@@ -143,8 +143,17 @@ test("the reviewer shell exports raw output while preserving CLI failure", { ski
     cpSync(new URL("../.github/codex", import.meta.url), join(directory, ".github/codex"), { recursive: true });
     writeFileSync(join(directory, "bin/corepack"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(directory, "bin/pnpm"), `#!/bin/sh
-if [ "$3" = "features" ]; then printf 'shell_tool stable true\\nunified_exec stable true\\n'; exit 0; fi
-if [ "$3" = "sandbox" ]; then exit "$PREFLIGHT_STATUS"; fi
+shift 2
+while [ "$1" = "-c" ]; do shift 2; done
+action="$1"
+shift
+if [ "$action" = "features" ]; then printf 'shell_tool stable true\\nunified_exec stable true\\n'; exit 0; fi
+if [ "$action" = "sandbox" ]; then
+  # Pinned Codex chooses the platform itself; a platform name is not a subcommand.
+  [ "$1" = "--" ] || exit 64
+  exit "$PREFLIGHT_STATUS"
+fi
+[ "$action" = "exec" ] || exit 64
 if [ "$WRITE_VERDICT" = "true" ]; then printf '%s' "$FIXTURE" > "$RUNNER_TEMP/verdict.json"; fi
 printf '{"type":"thread.started","thread_id":"fixture"}\\n'
 exit "$CLI_STATUS"

@@ -109,16 +109,15 @@ jobs:
           corepack prepare pnpm@11.9.0 --activate
           # Ubuntu's user-namespace restriction prevents bwrap startup here.
           # The pinned CLI supports equivalent read-only enforcement via Landlock.
-          pnpm dlx @openai/codex@0.153.2 sandbox linux \
-            -c features.use_legacy_landlock=true -c 'sandbox_mode="read-only"' -- \
+          pnpm dlx @openai/codex@0.153.2 \
+            -c use_legacy_landlock=true -c 'sandbox_mode="read-only"' sandbox -- \
             sh -c 'cat AGENTS.md > /dev/null && if probe=$(mktemp "$PWD/.review-write-probe.XXXXXX"); then rm -- "$probe"; echo "Sandbox allowed a workspace write"; exit 1; else echo "Sandbox read passed; workspace write denied"; fi'
           # Record effective tool flags without printing configuration or auth.
-          pnpm dlx @openai/codex@0.153.2 features list -c features.use_legacy_landlock=true |
+          pnpm dlx @openai/codex@0.153.2 -c use_legacy_landlock=true features list |
             awk '$1 == "shell_tool" || $1 == "unified_exec" || $1 == "use_legacy_landlock"' || echo "Tool feature diagnostics unavailable"
           set +e
-          pnpm dlx @openai/codex@0.153.2 exec \
+          pnpm dlx @openai/codex@0.153.2 -c use_legacy_landlock=true exec \
             --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never --json \
-            -c features.use_legacy_landlock=true \
             --output-schema .github/codex/review-schema.json \
             --output-last-message "$RUNNER_TEMP/verdict.json" \
             - < .github/codex/review-prompt.md | tee "$RUNNER_TEMP/review-events.jsonl"
