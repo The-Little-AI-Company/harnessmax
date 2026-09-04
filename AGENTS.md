@@ -60,8 +60,11 @@ and posts its findings. `.github/workflows/codex-review.yml` runs the deep
 review in CI, at high effort and scoped to the pull request's diff, only
 when the pull request crosses a breakpoint. `scripts/detect-breakpoint.mjs`
 decides that from the changed paths against `.github/codex/breakpoints.txt`,
-and the `deep-review` label forces it. Both follow
-`.github/codex/review-prompt.md` and this section. Every finding blocks
+and the `deep-review` label forces it. The deep review runs on the
+maintainer's Codex subscription through the `codex-review` environment,
+whose secret is reachable only after the maintainer approves the run, and
+it warns when the login refreshed so the secret gets re-uploaded. Both
+follow `.github/codex/review-prompt.md` and this section. Every finding blocks
 the merge. The author fixes it, or replies with the reason and a
 maintainer dismisses it. A finding is a defect with a file, a line, and a
 fix, never a preference.
