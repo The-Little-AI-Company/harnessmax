@@ -62,7 +62,7 @@ when the pull request crosses a breakpoint. `scripts/detect-breakpoint.mjs`
 decides that from the changed paths against `.github/codex/breakpoints.txt`,
 and the `deep-review` label forces it. The deep review runs on the
 maintainer's Codex subscription through the `codex-review` environment,
-whose secret is reachable only after the maintainer approves the run, and
+whose secret is reachable only after its environment approval, and
 it warns when the login refreshed so the secret gets re-uploaded. Both
 follow `.github/codex/review-prompt.md` and this section. Every finding blocks
 the merge. The author fixes it, or replies with the reason and a
@@ -156,5 +156,11 @@ messages say what changed and why in plain words.
 
 ## Boundaries
 
-Nothing here publishes, deploys, sends, or spends without the maintainer's
-explicit approval. Agents open pull requests. People merge them.
+Jeff grants standing authorization for the selected issue's commits,
+pushes, PR creation and updates, scoped backlog maintenance, review fixes,
+and approval of same-repository review runs after the orchestrator inspects
+the exact workflow and SHA. Do not ask for each commit or review. Finish
+the review/fix loop, then bring the verified PR to Jeff for merge approval.
+This does not authorize unrelated/fork review runs, deployments, spending,
+credential changes, unrelated external messages, or destruction of others'
+work. Agents prepare and review pull requests. Jeff approves their merge.
