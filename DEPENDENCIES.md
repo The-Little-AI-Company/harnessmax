@@ -19,8 +19,8 @@ in CI.
 
 | Package | Kind | Purpose | License | Gate passed |
 |---|---|---|---|---|
-
-No packages yet. The scaffold in issue #4 adds the first rows.
+| `typescript` | dev | 7.0.2, the TypeScript compiler for `tsc --noEmit` | Apache-2.0 | 2026-09-04, published 2026-07-08, no install scripts, platform binaries as optional dependencies. [Docs](https://www.typescriptlang.org/download/), [registry](https://registry.npmjs.org/typescript/7.0.2) |
+| `vitest` | dev | 4.1.11, TypeScript test execution, discovery, and assertions | MIT | 2026-09-04, published 2026-08-18, SLSA provenance, no install scripts. [Docs](https://vitest.dev/guide/), [registry](https://registry.npmjs.org/vitest/4.1.11) |
 
 ## Planned, by issue
 
@@ -30,7 +30,6 @@ Not installed. Listed so the budget is visible before the first install.
 |---|---|---|---|
 | `react`, `react-dom` | #4 | UI | MIT |
 | `vite`, `@vitejs/plugin-react` | #4 | Build | MIT |
-| `typescript` | #4 | Types | Apache-2.0 |
 | `tailwindcss`, `@tailwindcss/vite` | #4 | Styling for shadcn/ui | MIT |
 | `shadcn` (CLI, dev) | #4 | Component source, vendored into the repo | MIT |
 | `lucide-react` | #17 | The icon subset, vendored | ISC |

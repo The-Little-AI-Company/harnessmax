@@ -1,0 +1,15 @@
+{
+  "name": "harnessmax",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude \"scripts/**\"",
+    "check": "pnpm run typecheck && pnpm run test"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
