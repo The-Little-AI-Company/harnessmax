@@ -1,0 +1,26 @@
+# Dependencies and builds
+node_modules/
+dist/
+.vite/
+src-tauri/target/
+benchmarks/**/data/
+
+# Secrets. Values live in .env.local or the OS keyring, never in git.
+.env
+.env.*
+!.env.schema
+!.env.example
+
+# Agent config and machine-local instructions
+.claude/
+.codex/
+.claude.json
+CLAUDE.local.md
+*.local.md
+.mcp.json
+
+# Editors and OS
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
