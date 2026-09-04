@@ -90,7 +90,11 @@ the agent surface and gates, the workspace contract and folder interface,
 the MCP server, the Tauri shell, CI, scripts, and the dependency files.
 A maintainer also runs an adversarial multi-model review on those before
 merge. Add a path to the list in the same pull request that creates a new
-boundary.
+boundary. A pull request runs the workflow from its own merge ref, so it
+could edit the detector or the workflow to hide itself. Changes under
+`.github/` or to the detector force the deep review regardless of the
+list, and a maintainer reads every pull request that touches `.github/`
+before merging it.
 
 ## Dependencies
 
