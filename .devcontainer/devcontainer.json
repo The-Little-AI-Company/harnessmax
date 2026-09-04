@@ -1,0 +1,11 @@
+{
+  "name": "harnessmax",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "postCreateCommand": "corepack enable && corepack prepare pnpm@11.9.0 --activate",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "bradlc.vscode-tailwindcss"]
+    }
+  },
+  "remoteUser": "node"
+}

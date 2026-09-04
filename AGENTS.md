@@ -32,11 +32,63 @@ lowest-numbered `ready-for-agent` issue with no open blockers, comment that
 you started, do the work, run the verify block, and close it with the
 verify output in the closing comment. Then edit the issues it unblocks.
 
-## Branches
+## Branches and commits
 
-`dev` is the default working branch. `feature/*` branches merge into `dev`
-by pull request. `prod` is for releases. One issue per branch, one pull
-request per issue, atomic commits.
+`dev` is the default working branch. `prod` is the release branch and only
+receives merges from `dev`. Work happens on a branch named for its kind and
+its subject: `feat/<slug>`, `fix/<slug>`, `chore/<slug>`, `docs/<slug>`,
+`refactor/<slug>`, `ci/<slug>`, `test/<slug>`, `perf/<slug>`. One issue per
+branch, one pull request per issue.
+
+Commits are atomic. One commit is one change a reviewer can read on its own
+and revert on its own: a type plus its tests, one fix, one rename. A commit
+that needs "and" in its subject is two commits. Never squash on merge, since
+that erases the atomic history. Rebase onto `dev` instead of merging `dev`
+in. The subject is a capitalized sentence under 72 characters with no
+trailing period, and the body says why.
+
+`node scripts/check-git.mjs --branch <name>` and
+`node scripts/check-git.mjs --range origin/dev..HEAD` run in CI on every
+pull request and fail on a bad name, a merge commit, a throwaway subject, or
+an em dash.
+
+## Code review rules
+
+Codex reviews every pull request into `dev` from
+`.github/workflows/codex-review.yml`, following `.github/codex/review-prompt.md`
+and this section. Every finding blocks the merge. The author fixes it, or
+replies with the reason and a maintainer dismisses it. A finding is a
+defect with a file, a line, and a fix, never a preference.
+
+Reviewers, human or model, check these in order:
+
+1. No secret, token, or key in the diff or in a test fixture.
+2. Every write to a user's file goes through the one receipt-writing
+   function. No second write path.
+3. Anything that executes runs in a sandbox tier the user can see.
+4. The design tokens hold: no `box-shadow`, no gradient, no motion the
+   reader did not cause, radius 4px on controls and 0 on panels, sentence
+   case, an icon only beside a word.
+5. pnpm only, every dependency pinned exactly and listed in
+   `DEPENDENCIES.md`.
+6. The issue's Verify block ran and its output is in the pull request.
+7. The change is the smallest one that solves the problem. No layer, wrapper,
+   or option that has one caller.
+
+Breakpoints get a deeper review. Add the `deep-review` label to the pull
+request that closes any of these, and the reviewer runs at high effort with
+the boundary checks in the prompt: #4 (the shell), #8 (the first write),
+#11 (the sandbox), #13 (the desktop shell), #18 (the MCP server), and #14
+(the alpha). A maintainer also runs an adversarial multi-model review on
+those before merge.
+
+## Dependencies
+
+`DEPENDENCIES.md` is the ledger. A package enters `package.json` and the
+ledger in the same commit, pinned exactly, after the dependency gate in the
+security-audit skill has run. `node scripts/check-deps-ledger.mjs` fails CI
+on drift or a floating version. Before adding a package, say what it does
+that twenty lines of project code cannot.
 
 ## Toolchain
 
@@ -69,9 +121,18 @@ always beside a word, no AI-generated images.
 
 ## Sandboxing
 
-Development happens inside a container. The repository ships a devcontainer
-and CI runs in it. Code the console executes on a user's behalf runs in a
-sandbox tier the user can see, and every execution leaves a receipt.
+Development happens inside a container. `.devcontainer/devcontainer.json`
+describes it, and CI runs the same checks on a bare runner
+(`.github/workflows/ci.yml`). Code the console executes on a user's behalf
+runs in a sandbox tier the user can see, and every execution leaves a
+receipt.
+
+## Skills
+
+Project skills live in `.agents/skills/` and are the procedures agents
+follow here. Read the matching one before the work: `browserpod` for
+anything that touches the sandbox tier, `here-now` (a shared skill) for
+publishing a static site.
 
 ## Writing
 
