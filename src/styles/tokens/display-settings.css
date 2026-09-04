@@ -1,0 +1,7 @@
+/* Display settings. Orthogonal to themes: set on <html> alongside data-theme. */
+[data-size="large"]{font-size:112.5%}
+[data-size="larger"]{font-size:125%}
+[data-spacing="open"]{--leading-body:1.8;--para-space:2em;--letter-space:0.12em;--word-space:0.16em}
+[data-density="compact"]{--row-pad:0.5rem;--rail:3rem}
+[data-motion="off"]{--duration:0ms /* @kind other */}
+@media (prefers-reduced-motion:reduce){:root{--duration:0ms /* @kind other */}}

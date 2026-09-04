@@ -50,19 +50,22 @@ request per issue, atomic commits.
 
 ## Design tokens
 
-The design tokens live in `src/styles/tokens.css` and nowhere else. Four
-themes share one identity: Signal, Paper, Calm, and Contrast. Before any
-color change ships, run:
+The design tokens live in `src/styles/tokens/` and nowhere else:
+`colors.css` for the four themes, `typography.css`, `spacing.css`,
+`display-settings.css`, `fonts.css`, and `base.css` for element defaults and
+the structural classes. `src/styles/index.css` imports them in that order.
+Four themes share one identity: Signal, Paper, Calm, and Contrast. Before
+any color change ships, run:
 
 ```bash
-node scripts/contrast-check.mjs src/styles/tokens.css
+node scripts/contrast-check.mjs src/styles/tokens/colors.css
 ```
 
 It computes WCAG 2.2 contrast for every text, link, rule, and focus pair in
 every theme and exits 1 on the first failure. Rules that hold everywhere: no
 `box-shadow`, no gradient, no motion the reader did not cause, radius 4px on
-controls and 0 on panels, sentence case everywhere, no icons, no
-AI-generated images.
+controls and 0 on panels, sentence case everywhere, Lucide icons only and
+always beside a word, no AI-generated images.
 
 ## Sandboxing
 

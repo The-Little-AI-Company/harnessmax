@@ -1,0 +1,12 @@
+/* Fonts. All three are SIL OFL and served by Google Fonts.
+   No binaries were provided with the brand doc, so these load from the Google
+   CDN. Section 5 of design.md asks for self-hosted variable woff2 with
+   font-display: swap — drop the .woff2 files into assets/fonts/ and replace
+   this @import with the @font-face block below. */
+@import url("https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,400..700;1,62..125,400..700&family=Atkinson+Hyperlegible+Next:ital,wght@0,200..800;1,200..800&family=Atkinson+Hyperlegible+Mono:ital,wght@0,200..800;1,200..800&display=swap");
+
+/* Self-hosting template — uncomment once assets/fonts/ is populated.
+@font-face{font-family:'Archivo';src:url("../assets/fonts/Archivo-Variable.woff2") format("woff2-variations");font-weight:400 700;font-stretch:62% 125%;font-display:swap}
+@font-face{font-family:'Atkinson Hyperlegible Next';src:url("../assets/fonts/AtkinsonHyperlegibleNext-Variable.woff2") format("woff2-variations");font-weight:200 800;font-display:swap}
+@font-face{font-family:'Atkinson Hyperlegible Mono';src:url("../assets/fonts/AtkinsonHyperlegibleMono-Variable.woff2") format("woff2-variations");font-weight:200 800;font-display:swap}
+*/

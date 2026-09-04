@@ -1,0 +1,24 @@
+/* Space, measure, shape. 8px unit. Panels have no radius; controls have 4px. */
+:root{
+  --unit:8px;
+  --space-1:0.5rem;
+  --space-2:1rem;
+  --space-3:1.5rem;
+  --space-4:2rem;
+  --space-6:3rem;
+  --space-9:7rem;
+  --measure:64ch;
+  --page-max:80rem;
+  --rail:3.5rem;
+  --tree:16rem;
+  --drawer:22rem;
+  --row-pad:0.75rem;
+  --gutter:1.5rem;
+  --section-pad:7rem;
+  --target-min:44px;
+  --radius-control:4px;
+  --radius-panel:0;
+  --shadow:none;
+  --duration:160ms; /* @kind other */
+  --ease:ease-out; /* @kind other */
+}

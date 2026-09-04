@@ -1,0 +1,29 @@
+/* Type. Two families and a mono sibling. Themes never change these. */
+:root{
+  --font-display:'Archivo','Helvetica Neue',Arial,sans-serif;
+  --font-ui:'Atkinson Hyperlegible Next',system-ui,'Segoe UI',sans-serif;
+  --font-mono:'Atkinson Hyperlegible Mono',ui-monospace,Consolas,monospace;
+  --display-width:88; /* @kind other */
+  --text-display:clamp(2.6rem,calc(1.6rem + 4vw),4.75rem); /* @kind font */
+  --text-h1:clamp(2rem,calc(1.4rem + 2vw),3rem); /* @kind font */
+  --text-h2:clamp(1.5rem,calc(1.2rem + 1vw),2rem); /* @kind font */
+  --text-h3:1.25rem;
+  --text-lead:1.2rem;
+  --text-body-size:1rem;
+  --text-small:0.9375rem;
+  --text-ui:0.9375rem;
+  --text-caption:0.8125rem;
+  --text-stat:2rem;
+  --text-mono:0.875rem;
+  --weight-body:400;
+  --weight-ui:500;
+  --weight-emphasis:600;
+  --weight-display:700;
+  --leading-body:1.6;
+  --leading-display:0.98;
+  --leading-h1:1.04;
+  --leading-h2:1.1;
+  --para-space:1.25rem;
+  --letter-space:0;
+  --word-space:0;
+}

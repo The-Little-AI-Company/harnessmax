@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Checks every theme in design.md against WCAG 2.2 contrast thresholds.
-// Usage: node contrast-check.mjs [path/to/design.md] [--md]
+// Usage: node contrast-check.mjs [path/to/design.md or colors.css] [--md]
+// Accepts minified blocks: the last declaration before } needs no semicolon.
 // Exit code 1 when any pair fails. --md prints a Markdown table.
 // One source of truth: the CSS blocks inside design.md. Do not put values here.
 
@@ -41,7 +42,7 @@ const blockRe = /(:root|\[data-theme="([a-z-]+)"\])\s*\{([^}]*)\}/g;
 for (const m of css.matchAll(blockRe)) {
   const name = m[2] ?? "default";
   const vars = blocks.get(name) ?? {};
-  for (const v of m[3].matchAll(/(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})\s*;/g)) {
+  for (const v of m[3].matchAll(/(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})(?=\s*(?:;|$|\}))/g)) {
     vars[v[1]] = v[2];
   }
   blocks.set(name, vars);
