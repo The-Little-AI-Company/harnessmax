@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [dev, prod]
+  push:
+    branches: [dev, prod]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
+      - name: Branch name
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: node scripts/check-git.mjs --branch "$HEAD_REF"
+
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-git.mjs --range "$BASE_SHA..$HEAD_SHA"
+
+      - name: Dependency ledger
+        run: node scripts/check-deps-ledger.mjs
+
+      - name: Contrast
+        run: node scripts/contrast-check.mjs src/styles/tokens/colors.css
+
+      - name: Install
+        if: hashFiles('package.json') != ''
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Build and check
+        if: hashFiles('package.json') != ''
+        run: pnpm run check
