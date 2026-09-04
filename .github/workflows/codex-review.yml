@@ -85,6 +85,10 @@ jobs:
           chmod 700 "$home"
           printf '%s' "$CODEX_AUTH_JSON" > "$home/auth.json"
           chmod 600 "$home/auth.json"
+          # Prove the secret is intact without printing a value. A shell that
+          # strips quotes on upload leaves a file jq rejects.
+          jq -e 'type == "object"' "$home/auth.json" > /dev/null || { echo "CODEX_AUTH_JSON is not a JSON object. Re-upload it from a shell that keeps the quotes."; exit 1; }
+          echo "auth keys: $(jq -r 'keys | join(",")' "$home/auth.json"), auth_mode: $(jq -r '.auth_mode // "unset"' "$home/auth.json")"
           printf 'cli_auth_credentials_store = "file"\nmodel_reasoning_effort = "high"\n' > "$home/config.toml"
           sha256sum "$home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.before"
           echo "home=$home" >> "$GITHUB_OUTPUT"
