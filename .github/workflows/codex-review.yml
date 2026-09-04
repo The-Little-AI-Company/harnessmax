@@ -66,6 +66,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch the base and head refs for the diff
@@ -104,6 +105,9 @@ jobs:
         id: run_codex
         env:
           CODEX_HOME: ${{ steps.seed.outputs.home }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           corepack enable
           corepack prepare pnpm@11.9.0 --activate
@@ -163,6 +167,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
@@ -197,15 +202,17 @@ jobs:
         env:
           CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
           REVIEW_RESULT: ${{ needs.review.result }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           printf '%s' "$CODEX_VERDICT" > verdict.json
           # Changing enforcement requires a workflow edit and human review.
           # Verify both policy inputs before executing code from this checkout.
           printf '%s\n' \
-            'a2cc38d0769540599ae8a99433e05ae124f5a90ffa57f26bead863879739313d  scripts/check-review-verdict.mjs' \
+            '70d06907d6fbb1ab556f4c20009f8efcb2f0a3ff1bfb0a342ef364faf7288fd5  scripts/check-review-verdict.mjs' \
             '6e335c81e3016f59c201aefb37150433d5594208038cf4d24e303f42548b0722  .github/codex/review-schema.json' |
             sha256sum --check --strict
-          node scripts/check-review-verdict.mjs verdict.json
+          node scripts/check-review-verdict.mjs verdict.json "$REVIEW_BASE_SHA...$REVIEW_HEAD_SHA"
           echo "review job: $REVIEW_RESULT"
           test "$REVIEW_RESULT" = "success"
 

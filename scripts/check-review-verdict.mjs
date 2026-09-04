@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const schema = JSON.parse(readFileSync(new URL("../.github/codex/review-schema.json", import.meta.url), "utf8"));
@@ -28,7 +29,7 @@ function validate(value, rule, path, errors) {
   }
 }
 
-export function assessReview(raw) {
+export function assessReview(raw, changedFiles) {
   let review;
   try {
     review = JSON.parse(raw);
@@ -44,6 +45,11 @@ export function assessReview(raw) {
     if (!review.blockers.length) errors.push("An incomplete review must explain its execution blocker.");
   }
   if (review.review_status === "complete" && !review.reviewed_files.length) errors.push("A complete review must name the files inspected.");
+  if (!Array.isArray(changedFiles) || !changedFiles.length) errors.push("The changed-file set is missing or empty.");
+  else {
+    const inspected = new Set(review.reviewed_files);
+    for (const path of changedFiles) if (!inspected.has(path)) errors.push(`Changed file was not inspected: ${path}`);
+  }
   if (review.blockers.length) errors.push("The review has unresolved execution blockers.");
   if (review.verdict !== "pass") errors.push("The reviewer returned a blocked verdict.");
   if (review.findings.length) errors.push(`The review contains ${review.findings.length} finding(s).`);
@@ -52,16 +58,18 @@ export function assessReview(raw) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const file = process.argv[2];
-  if (!file) {
-    console.error("Usage: node scripts/check-review-verdict.mjs <verdict.json>");
+  const range = process.argv[3];
+  if (!file || !range) {
+    console.error("Usage: node scripts/check-review-verdict.mjs <verdict.json> <base...head>");
     process.exitCode = 2;
   } else {
     try {
-      const result = assessReview(readFileSync(file, "utf8"));
+      const changedFiles = execFileSync("git", ["diff", "--name-only", "-z", range, "--"], { encoding: "utf8" }).split("\0").filter(Boolean);
+      const result = assessReview(readFileSync(file, "utf8"), changedFiles);
       console.log(result.passed ? "ok complete review passed with no findings" : result.errors.join("\n"));
       process.exitCode = result.passed ? 0 : 1;
     } catch (error) {
-      console.error(`Cannot read review response: ${error.message}`);
+      console.error(`Cannot check review response: ${error.message}`);
       process.exitCode = 1;
     }
   }

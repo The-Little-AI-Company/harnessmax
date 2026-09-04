@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { assessReview } from "./check-review-verdict.mjs";
+import { assessReview as assessWithFiles } from "./check-review-verdict.mjs";
 
 const complete = {
   verdict: "pass",
@@ -16,7 +16,24 @@ const complete = {
   findings: [],
 };
 const finding = { severity: "P1", file: "scripts/check-review-verdict.mjs", line: 1, issue: "Blocked verdicts pass.", fix: "Require a passing verdict." };
+const assessReview = (raw) => assessWithFiles(raw, complete.reviewed_files);
 const assess = (value) => assessReview(JSON.stringify(value));
+
+function createGitFixture(directory) {
+  const git = (...args) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", ...args], { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "--quiet");
+  for (const file of complete.reviewed_files) {
+    mkdirSync(join(directory, "src/contract"), { recursive: true });
+    writeFileSync(join(directory, file), "before\n");
+  }
+  git("add", ".");
+  git("commit", "--quiet", "-m", "Fixture base");
+  const base = git("rev-parse", "HEAD");
+  for (const file of complete.reviewed_files) writeFileSync(join(directory, file), "after\n");
+  git("add", ".");
+  git("commit", "--quiet", "-m", "Fixture head");
+  return { base, head: git("rev-parse", "HEAD") };
+}
 
 test("accepts a justified complete pass without findings", () => {
   assert.equal(assess(complete).passed, true);
@@ -45,6 +62,10 @@ test("requires a justification and inspection evidence", () => {
   for (const summary of ["", "   ", null, 12]) assert.equal(assess({ ...complete, summary }).passed, false);
   assert.equal(assess({ ...complete, reviewed_files: [] }).passed, false);
   assert.equal(assess({ ...complete, blockers: ["Could not read a changed file."] }).passed, false);
+  assert.equal(assess({ ...complete, reviewed_files: [complete.reviewed_files[0]] }).passed, false);
+  assert.equal(assessWithFiles(JSON.stringify(complete), []).passed, false);
+  assert.equal(assessWithFiles(JSON.stringify(complete)).passed, false);
+  assert.equal(assessWithFiles(JSON.stringify(complete), [...complete.reviewed_files, "deleted.txt"]).passed, false);
 });
 
 test("rejects invalid JSON and incomplete or unexpected response shapes", () => {
@@ -103,6 +124,8 @@ test("the actual workflow shell requires both a valid pass and a successful revi
     // an isolated working directory so verdict.json never dirties the checkout.
     cpSync(join(repository, "scripts"), join(directory, "scripts"), { recursive: true });
     cpSync(join(repository, ".github/codex"), join(directory, ".github/codex"), { recursive: true });
+    const { base, head } = createGitFixture(directory);
+    const reviewEnvironment = { ...process.env, REVIEW_BASE_SHA: base, REVIEW_HEAD_SHA: head };
     for (const [raw, job, status] of [
       [JSON.stringify(complete), "success", 0],
       [JSON.stringify(complete), "failure", 1],
@@ -113,7 +136,7 @@ test("the actual workflow shell requires both a valid pass and a successful revi
       ["", "failure", 1],
     ]) {
       const result = spawnSync("bash", ["-e", "-c", command], {
-        cwd: directory, encoding: "utf8", env: { ...process.env, CODEX_VERDICT: raw, REVIEW_RESULT: job },
+        cwd: directory, encoding: "utf8", env: { ...reviewEnvironment, CODEX_VERDICT: raw, REVIEW_RESULT: job },
       });
       assert.equal(result.status, status, result.stdout + result.stderr);
     }
@@ -122,7 +145,7 @@ test("the actual workflow shell requires both a valid pass and a successful revi
       const original = readFileSync(path, "utf8");
       writeFileSync(path, file.endsWith(".mjs") ? "process.exit(0);\n" : "{}\n");
       const result = spawnSync("bash", ["-e", "-c", command], {
-        cwd: directory, encoding: "utf8", env: { ...process.env, CODEX_VERDICT: JSON.stringify(complete), REVIEW_RESULT: "success" },
+        cwd: directory, encoding: "utf8", env: { ...reviewEnvironment, CODEX_VERDICT: JSON.stringify(complete), REVIEW_RESULT: "success" },
       });
       assert.equal(result.status, 1, `Changed policy must fail before executing: ${file}`);
       assert.ok(result.stdout.includes(`${file}: FAILED`));
@@ -192,12 +215,15 @@ test("the command exits nonzero for a blocked, invalid, or missing response", ()
   const file = join(directory, "verdict.json");
   const script = fileURLToPath(new URL("./check-review-verdict.mjs", import.meta.url));
   try {
+    const { base, head } = createGitFixture(directory);
+    const range = `${base}...${head}`;
     for (const [raw, status] of [[JSON.stringify(complete), 0], ['{"verdict":"block","findings":[]}', 1], ["invalid", 1]]) {
       writeFileSync(file, raw);
-      const result = spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+      const result = spawnSync(process.execPath, [script, file, range], { cwd: directory, encoding: "utf8" });
       assert.equal(result.status, status, result.stdout + result.stderr);
     }
-    assert.equal(spawnSync(process.execPath, [script, join(directory, "missing.json")]).status, 1);
+    assert.equal(spawnSync(process.execPath, [script, join(directory, "missing.json"), range], { cwd: directory }).status, 1);
+    assert.equal(spawnSync(process.execPath, [script, file, "missing...HEAD"], { cwd: directory }).status, 1);
   } finally {
     rmSync(directory, { recursive: true });
   }
