@@ -144,24 +144,30 @@ test("the reviewer shell exports raw output while preserving CLI failure", { ski
     writeFileSync(join(directory, "bin/corepack"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(directory, "bin/pnpm"), `#!/bin/sh
 if [ "$3" = "features" ]; then printf 'shell_tool stable true\\nunified_exec stable true\\n'; exit 0; fi
+if [ "$3" = "sandbox" ]; then exit "$PREFLIGHT_STATUS"; fi
 if [ "$WRITE_VERDICT" = "true" ]; then printf '%s' "$FIXTURE" > "$RUNNER_TEMP/verdict.json"; fi
 printf '{"type":"thread.started","thread_id":"fixture"}\\n'
 exit "$CLI_STATUS"
 `, { mode: 0o755 });
-    for (const [raw, cliStatus, write, status] of [
-      [JSON.stringify(complete), "0", "true", 0],
-      ['{"verdict":"block","findings":[]}', "0", "true", 0],
-      ["malformed", "0", "true", 0],
-      [JSON.stringify(complete), "7", "true", 7],
-      ["", "0", "false", 1],
+    for (const [raw, cliStatus, write, preflightStatus, status] of [
+      [JSON.stringify(complete), "0", "true", "0", 0],
+      ['{"verdict":"block","findings":[]}', "0", "true", "0", 0],
+      ["malformed", "0", "true", "0", 0],
+      [JSON.stringify(complete), "7", "true", "0", 7],
+      ["", "0", "false", "0", 1],
+      ["", "0", "false", "2", 2],
     ]) {
       const runner = mkdtempSync(join(directory, "runner-"));
       const output = join(runner, "output");
       const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", command], {
         cwd: directory, encoding: "utf8", env: { ...process.env, PATH: `${join(directory, "bin")}:${process.env.PATH}`,
-          RUNNER_TEMP: runner, GITHUB_OUTPUT: output, FIXTURE: raw, CLI_STATUS: cliStatus, WRITE_VERDICT: write },
+          RUNNER_TEMP: runner, GITHUB_OUTPUT: output, FIXTURE: raw, CLI_STATUS: cliStatus, WRITE_VERDICT: write, PREFLIGHT_STATUS: preflightStatus },
       });
       assert.equal(result.status, status, result.stdout + result.stderr);
+      if (preflightStatus !== "0") {
+        assert.throws(() => readFileSync(join(runner, "review-events.jsonl")), { code: "ENOENT" });
+        continue;
+      }
       const exported = readFileSync(output, "utf8");
       const delimiter = exported.split("\n")[0].slice("verdict<<".length);
       assert.equal(exported, `verdict<<${delimiter}\n${raw}\n${delimiter}\n`);
