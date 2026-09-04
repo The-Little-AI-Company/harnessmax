@@ -51,7 +51,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      verdict: ${{ steps.run_codex.outputs['final-message'] }}
+      verdict: ${{ steps.run_codex.outputs.verdict }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,21 +75,37 @@ jobs:
           chmod 700 "$home"
           printf '%s' "$CODEX_AUTH_JSON" > "$home/auth.json"
           chmod 600 "$home/auth.json"
-          printf 'cli_auth_credentials_store = "file"\n' > "$home/config.toml"
+          printf 'cli_auth_credentials_store = "file"\nmodel_reasoning_effort = "high"\n' > "$home/config.toml"
           sha256sum "$home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.before"
           echo "home=$home" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
+      # openai/codex-action needs an API key for its prompt path, so the CLI
+      # runs directly. @openai/codex 0.153.2, Apache-2.0, SLSA provenance on
+      # npm, checked 2026-09-04. The model is the subscription's default.
       - name: Run Codex on this pull request's diff
         id: run_codex
-        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
-        with:
-          codex-home: ${{ steps.seed.outputs.home }}
-          permission-profile: ":workspace"
-          safety-strategy: drop-sudo
-          model: gpt-5.3-codex
-          effort: high
-          prompt-file: .github/codex/review-prompt.md
-          output-schema-file: .github/codex/review-schema.json
+        env:
+          CODEX_HOME: ${{ steps.seed.outputs.home }}
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          pnpm dlx @openai/codex@0.153.2 exec \
+            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never \
+            --output-schema .github/codex/review-schema.json \
+            --output-last-message "$RUNNER_TEMP/verdict.json" \
+            - < .github/codex/review-prompt.md
+          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
+          jq -e '.verdict and (.findings | type == "array")' "$RUNNER_TEMP/verdict.json" > /dev/null
+          {
+            echo "verdict<<CODEX_VERDICT_EOF"
+            cat "$RUNNER_TEMP/verdict.json"
+            echo
+            echo "CODEX_VERDICT_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Say whether the login refreshed itself
         if: always()
@@ -120,7 +136,7 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             let v;
-            try { v = JSON.parse(process.env.CODEX_VERDICT || '{}'); }
+            try { v = JSON.parse(process.env.CODEX_VERDICT || ''); }
             catch { v = { verdict: 'block', findings: [{ severity: 'P1', file: '', line: 0, issue: 'The reviewer returned no parseable verdict.', fix: 'Rerun the workflow or read the job log.' }] }; }
             const lines = (v.findings || []).map(
               f => `- **${f.severity}** \`${f.file}:${f.line}\` ${f.issue}\n  Fix: ${f.fix}`
