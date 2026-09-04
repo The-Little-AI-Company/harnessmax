@@ -107,19 +107,28 @@ jobs:
         run: |
           corepack enable
           corepack prepare pnpm@11.9.0 --activate
+          # Record effective tool flags without printing configuration or auth.
+          pnpm dlx @openai/codex@0.153.2 features list |
+            awk '$1 == "shell_tool" || $1 == "unified_exec"' || echo "Tool feature diagnostics unavailable"
+          set +e
           pnpm dlx @openai/codex@0.153.2 exec \
-            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never \
+            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never --json \
             --output-schema .github/codex/review-schema.json \
             --output-last-message "$RUNNER_TEMP/verdict.json" \
-            - < .github/codex/review-prompt.md
-          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
-          jq -e '.verdict and (.findings | type == "array")' "$RUNNER_TEMP/verdict.json" > /dev/null
+            - < .github/codex/review-prompt.md | tee "$RUNNER_TEMP/review-events.jsonl"
+          codex_status=${PIPESTATUS[0]}
+          set -e
+          # Export even malformed output so the gate can explain the failure.
+          touch "$RUNNER_TEMP/verdict.json"
+          delimiter="CODEX_VERDICT_$(cat /proc/sys/kernel/random/uuid)"
           {
-            echo "verdict<<CODEX_VERDICT_EOF"
+            echo "verdict<<$delimiter"
             cat "$RUNNER_TEMP/verdict.json"
             echo
-            echo "CODEX_VERDICT_EOF"
+            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
+          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
+          exit "$codex_status"
 
       - name: Say whether the login refreshed itself
         if: always()
@@ -142,14 +151,18 @@ jobs:
     # since a skipped required check counts as passing.
     if: always() && needs.detect.outputs.deep == 'true' && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
+      # Required to check out the tested gate. This repository is public.
+      contents: read
       pull-requests: write
     steps:
-      - name: Fail when the review did not complete
-        env:
-          REVIEW_RESULT: ${{ needs.review.result }}
-        run: |
-          echo "review job: $REVIEW_RESULT"
-          test "$REVIEW_RESULT" = "success"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
 
       - name: Post the review as a comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -158,27 +171,38 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            let v;
-            try { v = JSON.parse(process.env.CODEX_VERDICT || ''); }
-            catch { v = { verdict: 'block', findings: [{ severity: 'P1', file: '', line: 0, issue: 'The reviewer returned no parseable verdict.', fix: 'Rerun the workflow or read the job log.' }] }; }
-            const lines = (v.findings || []).map(
-              f => `- **${f.severity}** \`${f.file}:${f.line}\` ${f.issue}\n  Fix: ${f.fix}`
-            );
+            // Keep this token-bearing action self-contained. Never import code
+            // from the PR checkout into a process holding a write token.
+            const raw = process.env.CODEX_VERDICT || '';
+            const escapeHtml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+            let summary = 'The reviewer returned no usable justification. Read the raw response and gate errors.';
+            try {
+              const value = JSON.parse(raw);
+              if (typeof value?.summary === 'string' && value.summary.trim()) summary = value.summary;
+            } catch {}
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `## Codex deep review: ${v.verdict}\n\n${lines.join('\n') || 'No findings.'}`,
+              body: `## Codex deep review response\n\n${escapeHtml(summary)}\n\n<details><summary>Raw last response</summary>\n<pre>${escapeHtml(raw)}</pre>\n</details>`,
             });
 
-      - name: Fail on any finding
+      - name: Enforce review verdict
+        if: always()
         env:
           CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
+          REVIEW_RESULT: ${{ needs.review.result }}
         run: |
           printf '%s' "$CODEX_VERDICT" > verdict.json
-          count=$(jq '[.findings[]?] | length' verdict.json)
-          echo "findings: $count"
-          test "$count" -eq 0
+          # Changing enforcement requires a workflow edit and human review.
+          # Verify both policy inputs before executing code from this checkout.
+          printf '%s\n' \
+            'a2cc38d0769540599ae8a99433e05ae124f5a90ffa57f26bead863879739313d  scripts/check-review-verdict.mjs' \
+            '6e335c81e3016f59c201aefb37150433d5594208038cf4d24e303f42548b0722  .github/codex/review-schema.json' |
+            sha256sum --check --strict
+          node scripts/check-review-verdict.mjs verdict.json
+          echo "review job: $REVIEW_RESULT"
+          test "$REVIEW_RESULT" = "success"
 
   fork-guard:
     name: codex-review-fork-guard

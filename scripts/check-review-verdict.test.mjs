@@ -1,0 +1,189 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { assessReview } from "./check-review-verdict.mjs";
+
+const complete = {
+  verdict: "pass",
+  review_status: "complete",
+  summary: "Inspected the contract guard and its tests. Both union branches are covered and no defects were found.",
+  reviewed_files: ["src/contract/types.ts", "src/contract/types.test.ts"],
+  blockers: [],
+  findings: [],
+};
+const finding = { severity: "P1", file: "scripts/check-review-verdict.mjs", line: 1, issue: "Blocked verdicts pass.", fix: "Require a passing verdict." };
+const assess = (value) => assessReview(JSON.stringify(value));
+
+test("accepts a justified complete pass without findings", () => {
+  assert.equal(assess(complete).passed, true);
+});
+
+test("rejects the exact response that incorrectly passed PR 129", () => {
+  assert.equal(assessReview('{"verdict":"block","findings":[]}').passed, false);
+  assert.equal(assess({ ...complete, verdict: "block" }).passed, false);
+});
+
+test("rejects findings even when the verdict says pass", () => {
+  for (const verdict of ["pass", "block"]) assert.equal(assess({ ...complete, verdict, findings: [finding] }).passed, false);
+});
+
+test("rejects incomplete inspection and retains its explanation", () => {
+  const incomplete = { ...complete, verdict: "block", review_status: "incomplete", reviewed_files: [],
+    summary: "I could not inspect repository files because no shell or file tools were available.",
+    blockers: ["Available tools were limited to MCP resource inventory, which returned no files."] };
+  assert.equal(assess(incomplete).passed, false);
+  assert.equal(assess(incomplete).review.summary, incomplete.summary);
+  assert.equal(assess({ ...incomplete, verdict: "pass" }).passed, false);
+  assert.ok(assess({ ...incomplete, blockers: [] }).errors.some((error) => error.includes("explain")));
+});
+
+test("requires a justification and inspection evidence", () => {
+  for (const summary of ["", "   ", null, 12]) assert.equal(assess({ ...complete, summary }).passed, false);
+  assert.equal(assess({ ...complete, reviewed_files: [] }).passed, false);
+  assert.equal(assess({ ...complete, blockers: ["Could not read a changed file."] }).passed, false);
+});
+
+test("rejects invalid JSON and incomplete or unexpected response shapes", () => {
+  for (const raw of ["", "not JSON", "null", "[]"]) assert.equal(assessReview(raw).passed, false);
+  for (const key of Object.keys(complete)) {
+    const value = { ...complete };
+    delete value[key];
+    assert.equal(assess(value).passed, false, key);
+  }
+  for (const value of [
+    { ...complete, verdict: "approve" }, { ...complete, review_status: "done" },
+    { ...complete, findings: {} }, { ...complete, findings: [null] },
+    { ...complete, findings: [{ ...finding, severity: "P3" }] },
+    { ...complete, findings: [{ ...finding, line: 0 }] },
+    { ...complete, findings: [{ ...finding, line: 1.5 }] },
+    { ...complete, findings: [{ ...finding, fix: "" }] },
+    { ...complete, reviewed_files: [12] }, { ...complete, extra: true },
+  ]) assert.equal(assess(value).passed, false);
+});
+
+test("the token-bearing comment action safely posts justified and malformed responses without importing PR code", async () => {
+  const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
+  const step = workflow.split("- name: Post the review as a comment")[1].split("- name: Enforce review verdict")[0];
+  const script = step.split("script: |")[1].split("\n").map((line) => line.replace(/^            /, "")).join("\n");
+  const run = new (Object.getPrototypeOf(async function () {}).constructor)("github", "context", "process", script);
+  assert.ok(!/\b(import|require)\s*\(/.test(script));
+  for (const raw of [JSON.stringify(complete), '</pre><script>bad & text</script>\n```', "null", "", '{"findings":{}}']) {
+    let posted;
+    await run({ rest: { issues: { createComment: async (payload) => { posted = payload; } } } },
+      { repo: { owner: "test", repo: "repo" }, payload: { pull_request: { number: 130 } } },
+      { env: { CODEX_VERDICT: raw } });
+    assert.equal(posted.issue_number, 130);
+    assert.ok(posted.body.includes(raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")));
+    assert.ok(!posted.body.includes("<script>"));
+    if (raw === JSON.stringify(complete)) assert.ok(posted.body.includes(complete.summary));
+  }
+});
+
+test("the workflow invokes the tested gate and reports failures before rejecting", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
+  assert.ok(workflow.includes('node scripts/check-review-verdict.mjs verdict.json'));
+  assert.ok(workflow.indexOf("Post the review as a comment") < workflow.indexOf("Enforce review verdict"));
+  assert.ok(workflow.includes("--sandbox read-only"));
+  assert.ok(workflow.includes("environment: codex-review"));
+  assert.ok(workflow.includes("--json"));
+});
+
+test("the actual workflow shell requires both a valid pass and a successful review job", { skip: process.platform === "win32" }, () => {
+  const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
+  const step = workflow.split("- name: Enforce review verdict")[1].split("  fork-guard:")[0];
+  const command = step.split("run: |")[1].split("\n").map((line) => line.replace(/^          /, "")).join("\n");
+  const directory = mkdtempSync(join(tmpdir(), "review-workflow-"));
+  const repository = fileURLToPath(new URL("../", import.meta.url));
+  try {
+    // Use the workflow's command verbatim; copy its relative script path into
+    // an isolated working directory so verdict.json never dirties the checkout.
+    cpSync(join(repository, "scripts"), join(directory, "scripts"), { recursive: true });
+    cpSync(join(repository, ".github/codex"), join(directory, ".github/codex"), { recursive: true });
+    for (const [raw, job, status] of [
+      [JSON.stringify(complete), "success", 0],
+      [JSON.stringify(complete), "failure", 1],
+      [JSON.stringify(complete), "cancelled", 1],
+      [JSON.stringify(complete), "skipped", 1],
+      ['{"verdict":"block","findings":[]}', "success", 1],
+      ["invalid", "success", 1],
+      ["", "failure", 1],
+    ]) {
+      const result = spawnSync("bash", ["-e", "-c", command], {
+        cwd: directory, encoding: "utf8", env: { ...process.env, CODEX_VERDICT: raw, REVIEW_RESULT: job },
+      });
+      assert.equal(result.status, status, result.stdout + result.stderr);
+    }
+    for (const file of ["scripts/check-review-verdict.mjs", ".github/codex/review-schema.json"]) {
+      const path = join(directory, file);
+      const original = readFileSync(path, "utf8");
+      writeFileSync(path, file.endsWith(".mjs") ? "process.exit(0);\n" : "{}\n");
+      const result = spawnSync("bash", ["-e", "-c", command], {
+        cwd: directory, encoding: "utf8", env: { ...process.env, CODEX_VERDICT: JSON.stringify(complete), REVIEW_RESULT: "success" },
+      });
+      assert.equal(result.status, 1, `Changed policy must fail before executing: ${file}`);
+      assert.ok(result.stdout.includes(`${file}: FAILED`));
+      writeFileSync(path, original);
+    }
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test("the reviewer shell exports raw output while preserving CLI failure", { skip: process.platform === "win32" }, () => {
+  const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
+  const step = workflow.split("- name: Run Codex on this pull request's diff")[1].split("- name: Say whether the login refreshed itself")[0];
+  const command = step.split("run: |")[1].split("\n").map((line) => line.replace(/^          /, "")).join("\n");
+  const directory = mkdtempSync(join(tmpdir(), "review-run-"));
+  try {
+    mkdirSync(join(directory, "bin"));
+    cpSync(new URL("../.github/codex", import.meta.url), join(directory, ".github/codex"), { recursive: true });
+    writeFileSync(join(directory, "bin/corepack"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(directory, "bin/pnpm"), `#!/bin/sh
+if [ "$3" = "features" ]; then printf 'shell_tool stable true\\nunified_exec stable true\\n'; exit 0; fi
+if [ "$WRITE_VERDICT" = "true" ]; then printf '%s' "$FIXTURE" > "$RUNNER_TEMP/verdict.json"; fi
+printf '{"type":"thread.started","thread_id":"fixture"}\\n'
+exit "$CLI_STATUS"
+`, { mode: 0o755 });
+    for (const [raw, cliStatus, write, status] of [
+      [JSON.stringify(complete), "0", "true", 0],
+      ['{"verdict":"block","findings":[]}', "0", "true", 0],
+      ["malformed", "0", "true", 0],
+      [JSON.stringify(complete), "7", "true", 7],
+      ["", "0", "false", 1],
+    ]) {
+      const runner = mkdtempSync(join(directory, "runner-"));
+      const output = join(runner, "output");
+      const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", command], {
+        cwd: directory, encoding: "utf8", env: { ...process.env, PATH: `${join(directory, "bin")}:${process.env.PATH}`,
+          RUNNER_TEMP: runner, GITHUB_OUTPUT: output, FIXTURE: raw, CLI_STATUS: cliStatus, WRITE_VERDICT: write },
+      });
+      assert.equal(result.status, status, result.stdout + result.stderr);
+      const exported = readFileSync(output, "utf8");
+      const delimiter = exported.split("\n")[0].slice("verdict<<".length);
+      assert.equal(exported, `verdict<<${delimiter}\n${raw}\n${delimiter}\n`);
+      assert.ok(readFileSync(join(runner, "review-events.jsonl"), "utf8").includes('"thread.started"'));
+    }
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test("the command exits nonzero for a blocked, invalid, or missing response", () => {
+  const directory = mkdtempSync(join(tmpdir(), "review-verdict-"));
+  const file = join(directory, "verdict.json");
+  const script = fileURLToPath(new URL("./check-review-verdict.mjs", import.meta.url));
+  try {
+    for (const [raw, status] of [[JSON.stringify(complete), 0], ['{"verdict":"block","findings":[]}', 1], ["invalid", 1]]) {
+      writeFileSync(file, raw);
+      const result = spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+      assert.equal(result.status, status, result.stdout + result.stderr);
+    }
+    assert.equal(spawnSync(process.execPath, [script, join(directory, "missing.json")]).status, 1);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
