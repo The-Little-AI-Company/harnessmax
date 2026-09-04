@@ -113,6 +113,34 @@ test("the workflow invokes the tested gate and reports failures before rejecting
   assert.ok(workflow.includes("--json"));
 });
 
+test("the reviewer receives successful GitHub CI evidence only for its exact commit", async () => {
+  const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
+  const step = workflow.split("- name: Read successful CI evidence for this commit")[1].split("- name: Seed the Codex home")[0];
+  const script = step.split("script: |")[1].split("\n").map((line) => line.replace(/^            /, "")).join("\n");
+  const runScript = new (Object.getPrototypeOf(async function () {}).constructor)("github", "context", "process", "core", script);
+  const success = { id: 42, head_sha: "expected", conclusion: "success", html_url: "https://example.test/run/42" };
+  for (const runs of [[success], [{ ...success, head_sha: "old" }], [{ ...success, conclusion: "failure" }], []]) {
+    let evidence;
+    const run = runScript({ rest: { actions: {
+      listWorkflowRuns: async (args) => {
+        assert.equal(args.workflow_id, "ci.yml");
+        assert.equal(args.head_sha, "expected");
+        return { data: { workflow_runs: runs } };
+      }, listJobsForWorkflowRun: () => {},
+    } }, paginate: async () => [{ name: "checks", conclusion: "success", steps: [{ name: "Script tests", conclusion: "success" }] }] },
+    { repo: { owner: "test", repo: "repo" } }, { env: { REVIEW_HEAD_SHA: "expected" } },
+    { setOutput: (name, value) => { assert.equal(name, "evidence"); evidence = JSON.parse(value); } });
+    if (runs[0] === success) {
+      await run;
+      assert.equal(evidence.head_sha, "expected");
+      assert.equal(evidence.jobs[0].steps[0].conclusion, "success");
+    } else {
+      await assert.rejects(run, /No successful CI run/);
+      assert.equal(evidence, undefined);
+    }
+  }
+});
+
 test("the actual workflow shell requires both a valid pass and a successful review job", { skip: process.platform === "win32" }, () => {
   const workflow = readFileSync(new URL("../.github/workflows/codex-review.yml", import.meta.url), "utf8");
   const step = workflow.split("- name: Enforce review verdict")[1].split("  fork-guard:")[0];

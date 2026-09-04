@@ -60,6 +60,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
     outputs:
       verdict: ${{ steps.run_codex.outputs.verdict }}
     steps:
@@ -74,6 +75,25 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+
+      - name: Read successful CI evidence for this commit
+        id: ci_evidence
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const head = process.env.REVIEW_HEAD_SHA;
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: head,
+              event: 'pull_request', status: 'completed', per_page: 20,
+            });
+            const run = data.workflow_runs.find(run => run.head_sha === head && run.conclusion === 'success');
+            if (!run) throw new Error(`No successful CI run for ${head}; wait for CI before rerunning review.`);
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, per_page: 100 });
+            core.setOutput('evidence', JSON.stringify({ head_sha: head, run_id: run.id, url: run.html_url,
+              conclusion: run.conclusion, jobs: jobs.map(job => ({ name: job.name, conclusion: job.conclusion,
+                steps: job.steps.map(step => ({ name: step.name, conclusion: step.conclusion })) })) }));
 
       - name: Seed the Codex home from the subscription login
         id: seed
@@ -108,6 +128,7 @@ jobs:
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_PR_BODY: ${{ github.event.pull_request.body }}
+          REVIEW_CI_EVIDENCE: ${{ steps.ci_evidence.outputs.evidence }}
         run: |
           corepack enable
           corepack prepare pnpm@11.9.0 --activate
