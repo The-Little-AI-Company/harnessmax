@@ -7,16 +7,28 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assessReview as assessWithFiles } from "./check-review-verdict.mjs";
 
+const ciEvidence = { run_id: 42, conclusion: "success", jobs: [
+  { name: "checks", conclusion: "success", steps: [
+    { name: "Script tests", conclusion: "success" }, { name: "Contrast", conclusion: "success" },
+    { name: "Install", conclusion: "skipped" },
+  ] },
+] };
 const complete = {
   verdict: "pass",
   review_status: "complete",
   summary: "Inspected the contract guard and its tests. Both union branches are covered and no defects were found.",
   reviewed_files: ["src/contract/types.ts", "src/contract/types.test.ts"],
+  inspection: [
+    { file: "src/contract/types.ts", observation: "The rule-presence guard narrows both union members." },
+    { file: "src/contract/types.test.ts", observation: "Both runtime guard branches have assertions." },
+  ],
+  verification: { ci_run_id: 42, steps: [{ job: "checks", step: "Script tests" }, { job: "checks", step: "Contrast" }],
+    limitations: "Tests ran in CI; the read-only reviewer inspected recorded results." },
   blockers: [],
   findings: [],
 };
 const finding = { severity: "P1", file: "scripts/check-review-verdict.mjs", line: 1, issue: "Blocked verdicts pass.", fix: "Require a passing verdict." };
-const assessReview = (raw) => assessWithFiles(raw, complete.reviewed_files);
+const assessReview = (raw) => assessWithFiles(raw, complete.reviewed_files, ciEvidence);
 const assess = (value) => assessReview(JSON.stringify(value));
 
 function createGitFixture(directory) {
@@ -66,6 +78,22 @@ test("requires a justification and inspection evidence", () => {
   assert.equal(assessWithFiles(JSON.stringify(complete), []).passed, false);
   assert.equal(assessWithFiles(JSON.stringify(complete)).passed, false);
   assert.equal(assessWithFiles(JSON.stringify(complete), [...complete.reviewed_files, "deleted.txt"]).passed, false);
+});
+
+test("rejects placeholder-only reviews and missing or invented verification evidence", () => {
+  const { inspection, verification, ...legacy } = complete;
+  assert.equal(assess({ ...legacy, summary: "x" }).passed, false);
+  for (const changes of [
+    { inspection: [] }, { inspection: inspection.slice(1) },
+    { inspection: [{ ...inspection[0], observation: " " }, inspection[1]] },
+    { verification: { ...verification, ci_run_id: 99 } },
+    { verification: { ...verification, steps: [] } },
+    { verification: { ...verification, steps: verification.steps.slice(1) } },
+    { verification: { ...verification, steps: [...verification.steps, { job: "checks", step: "Install" }] } },
+    { verification: { ...verification, limitations: " " } },
+  ]) assert.equal(assess({ ...complete, ...changes }).passed, false);
+  assert.equal(assessWithFiles(JSON.stringify(complete), complete.reviewed_files).passed, false);
+  assert.equal(assessWithFiles(JSON.stringify(complete), complete.reviewed_files, { ...ciEvidence, conclusion: "failure" }).passed, false);
 });
 
 test("rejects invalid JSON and incomplete or unexpected response shapes", () => {
@@ -118,8 +146,18 @@ test("the reviewer receives successful GitHub CI evidence only for its exact com
   const step = workflow.split("- name: Read successful CI evidence for this commit")[1].split("- name: Seed the Codex home")[0];
   const script = step.split("script: |")[1].split("\n").map((line) => line.replace(/^            /, "")).join("\n");
   const runScript = new (Object.getPrototypeOf(async function () {}).constructor)("github", "context", "process", "core", script);
-  const success = { id: 42, head_sha: "expected", conclusion: "success", html_url: "https://example.test/run/42" };
-  for (const runs of [[success], [{ ...success, head_sha: "old" }], [{ ...success, conclusion: "failure" }], []]) {
+  const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.ok(ci.includes('run-name: CI PR${{ github.event.pull_request.number || 0 }} ${{ github.event.pull_request.base.sha || github.event.before }}...${{ github.event.pull_request.head.sha || github.sha }}'));
+  assert.ok(ci.includes('ref: ${{ github.sha }}'));
+  const association = { number: 131, head: { sha: "expected" }, base: { sha: "base" } };
+  const success = { id: 42, head_sha: "expected", conclusion: "success", html_url: "https://example.test/run/42", display_title: "CI PR131 base...expected", pull_requests: [association] };
+  // GitHub updates embedded PR metadata on historical runs. It cannot make
+  // an old event title valid for the new base, even when the head is unchanged.
+  const oldBase = { ...success, display_title: "CI PR131 old-base...expected" };
+  for (const runs of [[success], [oldBase, success], [oldBase],
+    [{ ...success, display_title: "CI PR129 base...expected" }],
+    [{ ...success, display_title: undefined }],
+    [{ ...success, head_sha: "old" }], [{ ...success, conclusion: "failure" }], []]) {
     let evidence;
     const run = runScript({ rest: { actions: {
       listWorkflowRuns: async (args) => {
@@ -128,11 +166,13 @@ test("the reviewer receives successful GitHub CI evidence only for its exact com
         return { data: { workflow_runs: runs } };
       }, listJobsForWorkflowRun: () => {},
     } }, paginate: async () => [{ name: "checks", conclusion: "success", steps: [{ name: "Script tests", conclusion: "success" }] }] },
-    { repo: { owner: "test", repo: "repo" } }, { env: { REVIEW_HEAD_SHA: "expected" } },
+    { repo: { owner: "test", repo: "repo" } }, { env: { REVIEW_HEAD_SHA: "expected", REVIEW_BASE_SHA: "base", REVIEW_PR_NUMBER: "131" } },
     { setOutput: (name, value) => { assert.equal(name, "evidence"); evidence = JSON.parse(value); } });
-    if (runs[0] === success) {
+    if (runs.includes(success)) {
       await run;
       assert.equal(evidence.head_sha, "expected");
+      assert.equal(evidence.base_sha, "base");
+      assert.equal(evidence.pr_number, 131);
       assert.equal(evidence.jobs[0].steps[0].conclusion, "success");
     } else {
       await assert.rejects(run, /No successful CI run/);
@@ -153,7 +193,7 @@ test("the actual workflow shell requires both a valid pass and a successful revi
     cpSync(join(repository, "scripts"), join(directory, "scripts"), { recursive: true });
     cpSync(join(repository, ".github/codex"), join(directory, ".github/codex"), { recursive: true });
     const { base, head } = createGitFixture(directory);
-    const reviewEnvironment = { ...process.env, REVIEW_BASE_SHA: base, REVIEW_HEAD_SHA: head };
+    const reviewEnvironment = { ...process.env, REVIEW_BASE_SHA: base, REVIEW_HEAD_SHA: head, REVIEW_CI_EVIDENCE: JSON.stringify(ciEvidence) };
     for (const [raw, job, status] of [
       [JSON.stringify(complete), "success", 0],
       [JSON.stringify(complete), "failure", 1],
@@ -247,7 +287,7 @@ test("the command exits nonzero for a blocked, invalid, or missing response", ()
     const range = `${base}...${head}`;
     for (const [raw, status] of [[JSON.stringify(complete), 0], ['{"verdict":"block","findings":[]}', 1], ["invalid", 1]]) {
       writeFileSync(file, raw);
-      const result = spawnSync(process.execPath, [script, file, range], { cwd: directory, encoding: "utf8" });
+      const result = spawnSync(process.execPath, [script, file, range], { cwd: directory, encoding: "utf8", env: { ...process.env, REVIEW_CI_EVIDENCE: JSON.stringify(ciEvidence) } });
       assert.equal(result.status, status, result.stdout + result.stderr);
     }
     assert.equal(spawnSync(process.execPath, [script, join(directory, "missing.json"), range], { cwd: directory }).status, 1);

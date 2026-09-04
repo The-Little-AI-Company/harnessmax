@@ -63,10 +63,11 @@ jobs:
       actions: read
     outputs:
       verdict: ${{ steps.run_codex.outputs.verdict }}
+      ci_evidence: ${{ steps.ci_evidence.outputs.evidence }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -81,17 +82,24 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const head = process.env.REVIEW_HEAD_SHA;
+            const base = process.env.REVIEW_BASE_SHA;
+            const number = Number(process.env.REVIEW_PR_NUMBER);
+            // Embedded pull_requests revisions are mutable. The run title is
+            // recorded by ci.yml from its original event, including the base.
+            const title = `CI PR${number} ${base}...${head}`;
             const { data } = await github.rest.actions.listWorkflowRuns({
               ...context.repo, workflow_id: 'ci.yml', head_sha: head,
               event: 'pull_request', status: 'completed', per_page: 20,
             });
-            const run = data.workflow_runs.find(run => run.head_sha === head && run.conclusion === 'success');
-            if (!run) throw new Error(`No successful CI run for ${head}; wait for CI before rerunning review.`);
+            const run = data.workflow_runs.find(run => run.head_sha === head && run.conclusion === 'success' && run.display_title === title);
+            if (!run) throw new Error(`No successful CI run for PR ${number} at ${base}...${head}; wait for CI before rerunning review.`);
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, per_page: 100 });
-            core.setOutput('evidence', JSON.stringify({ head_sha: head, run_id: run.id, url: run.html_url,
+            core.setOutput('evidence', JSON.stringify({ pr_number: number, base_sha: base, head_sha: head, run_id: run.id, url: run.html_url,
               conclusion: run.conclusion, jobs: jobs.map(job => ({ name: job.name, conclusion: job.conclusion,
                 steps: job.steps.map(step => ({ name: step.name, conclusion: step.conclusion })) })) }));
 
@@ -127,6 +135,7 @@ jobs:
           CODEX_HOME: ${{ steps.seed.outputs.home }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_PR_BODY: ${{ github.event.pull_request.body }}
           REVIEW_CI_EVIDENCE: ${{ steps.ci_evidence.outputs.evidence }}
         run: |
@@ -187,7 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -221,6 +230,7 @@ jobs:
       - name: Enforce review verdict
         if: always()
         env:
+          REVIEW_CI_EVIDENCE: ${{ needs.review.outputs.ci_evidence }}
           CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
           REVIEW_RESULT: ${{ needs.review.result }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -230,8 +240,8 @@ jobs:
           # Changing enforcement requires a workflow edit and human review.
           # Verify both policy inputs before executing code from this checkout.
           printf '%s\n' \
-            '70d06907d6fbb1ab556f4c20009f8efcb2f0a3ff1bfb0a342ef364faf7288fd5  scripts/check-review-verdict.mjs' \
-            '6e335c81e3016f59c201aefb37150433d5594208038cf4d24e303f42548b0722  .github/codex/review-schema.json' |
+            '9855b486350ace04a16bd09390a30eb1a54017fc96d0398397323848508c2fd2  scripts/check-review-verdict.mjs' \
+            'b1898fbae9803bbba21e218fd2167a6cb8ed0331b1fc6890bd4f264232c2c32a  .github/codex/review-schema.json' |
             sha256sum --check --strict
           node scripts/check-review-verdict.mjs verdict.json "$REVIEW_BASE_SHA...$REVIEW_HEAD_SHA"
           echo "review job: $REVIEW_RESULT"

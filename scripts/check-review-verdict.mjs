@@ -29,7 +29,7 @@ function validate(value, rule, path, errors) {
   }
 }
 
-export function assessReview(raw, changedFiles) {
+export function assessReview(raw, changedFiles, ciEvidence) {
   let review;
   try {
     review = JSON.parse(raw);
@@ -49,6 +49,21 @@ export function assessReview(raw, changedFiles) {
   else {
     const inspected = new Set(review.reviewed_files);
     for (const path of changedFiles) if (!inspected.has(path)) errors.push(`Changed file was not inspected: ${path}`);
+    const observations = new Set(review.inspection.map(item => item.file));
+    for (const path of changedFiles) if (!observations.has(path)) errors.push(`Missing inspection observation: ${path}`);
+    for (const path of observations) if (!inspected.has(path)) errors.push(`Observation names an uninspected file: ${path}`);
+  }
+  if (!ciEvidence || ciEvidence.conclusion !== "success" || !Number.isInteger(ciEvidence.run_id) || !Array.isArray(ciEvidence.jobs)) {
+    errors.push("Successful workflow-supplied CI evidence is required.");
+  } else {
+    if (review.verification.ci_run_id !== ciEvidence.run_id) errors.push("Verification cites a different CI run.");
+    const stepKey = (job, step) => JSON.stringify([job, step]);
+    const expected = new Set(ciEvidence.jobs.filter(job => job.conclusion === "success").flatMap(job =>
+      job.steps.filter(step => step.conclusion === "success").map(step => stepKey(job.name, step.name))));
+    const cited = new Set(review.verification.steps.map(item => stepKey(item.job, item.step)));
+    if (!expected.size) errors.push("CI evidence has no successful steps.");
+    for (const key of expected) if (!cited.has(key)) errors.push(`Missing CI step evidence: ${key}`);
+    for (const key of cited) if (!expected.has(key)) errors.push(`Unverified CI step claimed: ${key}`);
   }
   if (review.blockers.length) errors.push("The review has unresolved execution blockers.");
   if (review.verdict !== "pass") errors.push("The reviewer returned a blocked verdict.");
@@ -65,7 +80,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } else {
     try {
       const changedFiles = execFileSync("git", ["diff", "--name-only", "-z", range, "--"], { encoding: "utf8" }).split("\0").filter(Boolean);
-      const result = assessReview(readFileSync(file, "utf8"), changedFiles);
+      const result = assessReview(readFileSync(file, "utf8"), changedFiles, JSON.parse(process.env.REVIEW_CI_EVIDENCE || "null"));
       console.log(result.passed ? "ok complete review passed with no findings" : result.errors.join("\n"));
       process.exitCode = result.passed ? 0 : 1;
     } catch (error) {
