@@ -1,0 +1,51 @@
+#!/usr/bin/env node
+// Decides whether a set of changed files crosses a breakpoint.
+// Usage: git diff --name-only <base>...<head> | node scripts/detect-breakpoint.mjs
+//        node scripts/detect-breakpoint.mjs --range <base>...<head>
+// Prints "true" or "false" and the matching files. Exit code 0 either way.
+// The patterns live in .github/codex/breakpoints.txt. Zero dependencies.
+// Tests: node --test "scripts/*.test.mjs"
+
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+export function loadPatterns(text) {
+  return text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+}
+
+// Placeholders keep the double-star replacements out of reach of the
+// single-star pass. Printable so the file stays text for git and reviewers.
+const ANY_DEPTH = "<ANY_DEPTH>";
+const ANY = "<ANY>";
+
+export function globToRegex(glob) {
+  const source = glob
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, ANY_DEPTH)
+    .replace(/\*\*/g, ANY)
+    .replace(/\*/g, "[^/]*")
+    .split(ANY_DEPTH).join("(?:.*/)?")
+    .split(ANY).join(".*");
+  return new RegExp(`^${source}$`);
+}
+
+export function matches(files, patterns) {
+  const regexes = patterns.map(globToRegex);
+  return files.map((f) => f.trim()).filter(Boolean).filter((f) => regexes.some((re) => re.test(f)));
+}
+
+if (process.argv[1]?.endsWith("detect-breakpoint.mjs")) {
+  const patterns = loadPatterns(readFileSync(join(root, ".github/codex/breakpoints.txt"), "utf8"));
+  const args = process.argv.slice(2);
+  const rangeIdx = args.indexOf("--range");
+  const files = rangeIdx >= 0
+    ? execFileSync("git", ["diff", "--name-only", args[rangeIdx + 1]], { encoding: "utf8" }).split("\n")
+    : readFileSync(0, "utf8").split("\n");
+  const hits = matches(files, patterns);
+  console.log(hits.length ? "true" : "false");
+  for (const h of hits) console.log(`  ${h}`);
+}

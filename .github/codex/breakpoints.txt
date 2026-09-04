@@ -1,0 +1,20 @@
+# Paths whose change makes a pull request a breakpoint. One glob per line.
+# A pull request that touches any of these gets the deep Codex review in
+# CI, at high effort, and the merge waits on it. Everything else gets the
+# cloud integration's review on the subscription and a human read.
+# Syntax: ** matches any depth, * matches within one segment.
+src/receipts/**
+src/sandbox/**
+src/agent/**
+src/gates/**
+src/mcp/**
+src/workspace/folder.ts
+src/workspace/*-folder.ts
+src/contract/**
+src-tauri/**
+.github/**
+scripts/**
+package.json
+pnpm-lock.yaml
+DEPENDENCIES.md
+.env.schema

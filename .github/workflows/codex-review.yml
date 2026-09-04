@@ -12,14 +12,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
-    name: codex-review
+  detect:
+    name: codex-review-detect
     runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
     outputs:
-      verdict: ${{ steps.run_codex.outputs['final-message'] }}
+      deep: ${{ steps.detect.outputs.deep }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether this pull request crosses a breakpoint
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'deep-review') }}
+        run: |
+          result=$(node scripts/detect-breakpoint.mjs --range "$BASE_SHA...$HEAD_SHA")
+          echo "$result"
+          verdict=$(echo "$result" | head -n1)
+          if [ "$LABELED" = "true" ]; then verdict=true; fi
+          # A pull request can edit the detector or its list. Any change under
+          # .github or to the detector forces the deep review without consulting
+          # them. The workflow itself can still be edited by a pull request, which
+          # is why a maintainer reads every pull request that touches .github.
+          if git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -Eq '^(\.github/|scripts/detect-breakpoint)'; then verdict=true; fi
+          echo "deep=$verdict" >> "$GITHUB_OUTPUT"
+
+  review:
+    name: codex-review
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.deep == 'true' && github.event.pull_request.head.repo.full_name == github.repository
+    # The environment holds CODEX_AUTH_JSON, the maintainer's ChatGPT login,
+    # behind a required-reviewer rule, so every deep review waits for a click
+    # before the secret is reachable. OpenAI advises against this route on a
+    # public repository. The maintainer chose it knowingly on 2026-09-04.
+    environment: codex-review
+    # One deep review at a time across the repository, because every run
+    # seeds the same login and Codex may refresh it mid-run.
+    concurrency:
+      group: codex-subscription
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.run_codex.outputs.verdict }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,25 +74,83 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
 
-      - name: Run Codex
-        id: run_codex
-        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
+      - name: Seed the Codex home from the subscription login
+        id: seed
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          test -n "$CODEX_AUTH_JSON" || { echo "CODEX_AUTH_JSON is empty in the codex-review environment"; exit 1; }
+          home="$RUNNER_TEMP/codex-home"
+          mkdir -p "$home"
+          chmod 700 "$home"
+          printf '%s' "$CODEX_AUTH_JSON" > "$home/auth.json"
+          chmod 600 "$home/auth.json"
+          # Prove the secret is intact without printing a value. A shell that
+          # strips quotes on upload leaves a file jq rejects.
+          jq -e 'type == "object"' "$home/auth.json" > /dev/null || { echo "CODEX_AUTH_JSON is not a JSON object. Re-upload it from a shell that keeps the quotes."; exit 1; }
+          echo "auth keys: $(jq -r 'keys | join(",")' "$home/auth.json"), auth_mode: $(jq -r '.auth_mode // "unset"' "$home/auth.json")"
+          printf 'cli_auth_credentials_store = "file"\nmodel_reasoning_effort = "high"\n' > "$home/config.toml"
+          sha256sum "$home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.before"
+          echo "home=$home" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          permission-profile: ":workspace"
-          safety-strategy: drop-sudo
-          model: gpt-5.3-codex
-          effort: ${{ contains(github.event.pull_request.labels.*.name, 'deep-review') && 'high' || 'medium' }}
-          prompt-file: .github/codex/review-prompt.md
-          output-schema-file: .github/codex/review-schema.json
+          node-version: 22
+
+      # openai/codex-action needs an API key for its prompt path, so the CLI
+      # runs directly. @openai/codex 0.153.2, Apache-2.0, SLSA provenance on
+      # npm, checked 2026-09-04. The model is the subscription's default.
+      - name: Run Codex on this pull request's diff
+        id: run_codex
+        env:
+          CODEX_HOME: ${{ steps.seed.outputs.home }}
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          pnpm dlx @openai/codex@0.153.2 exec \
+            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never \
+            --output-schema .github/codex/review-schema.json \
+            --output-last-message "$RUNNER_TEMP/verdict.json" \
+            - < .github/codex/review-prompt.md
+          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
+          jq -e '.verdict and (.findings | type == "array")' "$RUNNER_TEMP/verdict.json" > /dev/null
+          {
+            echo "verdict<<CODEX_VERDICT_EOF"
+            cat "$RUNNER_TEMP/verdict.json"
+            echo
+            echo "CODEX_VERDICT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Say whether the login refreshed itself
+        if: always()
+        env:
+          HOME_DIR: ${{ steps.seed.outputs.home }}
+        run: |
+          after=$(sha256sum "$HOME_DIR/auth.json" | cut -d' ' -f1)
+          if [ "$after" != "$(cat "$RUNNER_TEMP/auth.before")" ]; then
+            echo "::warning::Codex refreshed the login during this run. The CODEX_AUTH_JSON secret now holds stale tokens. Re-upload it from the maintainer's machine before the next deep review."
+          else
+            echo "login unchanged"
+          fi
+          rm -rf "$HOME_DIR"
 
   gate:
     name: codex-review-gate
     runs-on: ubuntu-latest
-    needs: review
+    needs: [detect, review]
+    # always() keeps this job from being skipped when the review job fails,
+    # since a skipped required check counts as passing.
+    if: always() && needs.detect.outputs.deep == 'true' && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       pull-requests: write
     steps:
+      - name: Fail when the review did not complete
+        env:
+          REVIEW_RESULT: ${{ needs.review.result }}
+        run: |
+          echo "review job: $REVIEW_RESULT"
+          test "$REVIEW_RESULT" = "success"
+
       - name: Post the review as a comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -59,7 +159,7 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             let v;
-            try { v = JSON.parse(process.env.CODEX_VERDICT || '{}'); }
+            try { v = JSON.parse(process.env.CODEX_VERDICT || ''); }
             catch { v = { verdict: 'block', findings: [{ severity: 'P1', file: '', line: 0, issue: 'The reviewer returned no parseable verdict.', fix: 'Rerun the workflow or read the job log.' }] }; }
             const lines = (v.findings || []).map(
               f => `- **${f.severity}** \`${f.file}:${f.line}\` ${f.issue}\n  Fix: ${f.fix}`
@@ -68,7 +168,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `## Codex review: ${v.verdict}\n\n${lines.join('\n') || 'No findings.'}`,
+              body: `## Codex deep review: ${v.verdict}\n\n${lines.join('\n') || 'No findings.'}`,
             });
 
       - name: Fail on any finding
@@ -83,10 +183,11 @@ jobs:
   fork-guard:
     name: codex-review-fork-guard
     runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.full_name != github.repository
+    needs: detect
+    if: needs.detect.outputs.deep == 'true' && github.event.pull_request.head.repo.full_name != github.repository
     steps:
-      - name: Refuse to pass a fork pull request without a review
+      - name: Refuse a fork pull request that crosses a breakpoint
         run: |
-          echo "This pull request comes from a fork, so the reviewer has no key and did not run."
+          echo "This pull request crosses a breakpoint and comes from a fork, so the deep reviewer has no key and did not run."
           echo "A maintainer reviews it by hand and merges with an admin override, or asks the author to open it from a branch."
           exit 1

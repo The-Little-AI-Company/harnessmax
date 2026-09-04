@@ -39,5 +39,15 @@ Not installed. Listed so the budget is visible before the first install.
 | `@electric-sql/pglite-pgvector` | #6 | Vector search, off by default | Apache-2.0 |
 | `@tauri-apps/api`, `@tauri-apps/cli` (dev) | #13 | Desktop shell | Apache-2.0 or MIT |
 
-Container images and GitHub Actions carry a digest or a full commit SHA in
-the file that uses them, and this ledger does not track them.
+## CI tools
+
+Run in CI through `pnpm dlx` at an exact version, never installed in the
+repository. The check script does not compare these with `package.json`.
+
+| Package | Version | Purpose | License | Gate passed |
+|---|---|---|---|---|
+| `@openai/codex` | 0.153.2 | The deep review in `codex-review.yml` | Apache-2.0 | 2026-09-04, SLSA provenance on npm, no install scripts, platform binaries as optional dependencies |
+
+GitHub Actions carry a full commit SHA in the workflow that uses them, and
+the dev container image carries its tag in `.devcontainer/devcontainer.json`.
+This ledger does not repeat them.
