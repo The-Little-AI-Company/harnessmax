@@ -1,9 +1,43 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "findings"],
+  "required": ["verdict", "review_status", "summary", "reviewed_files", "inspection", "verification", "blockers", "findings"],
   "properties": {
     "verdict": { "type": "string", "enum": ["pass", "block"] },
+    "review_status": { "type": "string", "enum": ["complete", "incomplete"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "reviewed_files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "inspection": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["file", "observation"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1 },
+          "observation": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ci_run_id", "steps", "limitations"],
+      "properties": {
+        "ci_run_id": { "type": "integer", "minimum": 0 },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["job", "step"],
+            "properties": {
+              "job": { "type": "string", "minLength": 1 },
+              "step": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "limitations": { "type": "string", "minLength": 1 }
+      }
+    },
+    "blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "findings": {
       "type": "array",
       "items": {
@@ -12,10 +46,10 @@
         "required": ["severity", "file", "line", "issue", "fix"],
         "properties": {
           "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
-          "file": { "type": "string" },
-          "line": { "type": "integer" },
-          "issue": { "type": "string" },
-          "fix": { "type": "string" }
+          "file": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "issue": { "type": "string", "minLength": 1 },
+          "fix": { "type": "string", "minLength": 1 }
         }
       }
     }

@@ -60,12 +60,15 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
     outputs:
       verdict: ${{ steps.run_codex.outputs.verdict }}
+      ci_evidence: ${{ steps.ci_evidence.outputs.evidence }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch the base and head refs for the diff
@@ -73,6 +76,32 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+
+      - name: Read successful CI evidence for this commit
+        id: ci_evidence
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          script: |
+            const head = process.env.REVIEW_HEAD_SHA;
+            const base = process.env.REVIEW_BASE_SHA;
+            const number = Number(process.env.REVIEW_PR_NUMBER);
+            // Embedded pull_requests revisions are mutable. The run title is
+            // recorded by ci.yml from its original event, including the base.
+            const title = `CI PR${number} ${base}...${head}`;
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: head,
+              event: 'pull_request', status: 'completed', per_page: 20,
+            });
+            const run = data.workflow_runs.find(run => run.head_sha === head && run.conclusion === 'success' && run.display_title === title);
+            if (!run) throw new Error(`No successful CI run for PR ${number} at ${base}...${head}; wait for CI before rerunning review.`);
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, per_page: 100 });
+            core.setOutput('evidence', JSON.stringify({ pr_number: number, base_sha: base, head_sha: head, run_id: run.id, url: run.html_url,
+              conclusion: run.conclusion, jobs: jobs.map(job => ({ name: job.name, conclusion: job.conclusion,
+                steps: job.steps.map(step => ({ name: step.name, conclusion: step.conclusion })) })) }));
 
       - name: Seed the Codex home from the subscription login
         id: seed
@@ -104,22 +133,41 @@ jobs:
         id: run_codex
         env:
           CODEX_HOME: ${{ steps.seed.outputs.home }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_PR_BODY: ${{ github.event.pull_request.body }}
+          REVIEW_CI_EVIDENCE: ${{ steps.ci_evidence.outputs.evidence }}
         run: |
           corepack enable
           corepack prepare pnpm@11.9.0 --activate
-          pnpm dlx @openai/codex@0.153.2 exec \
-            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never \
+          # Ubuntu's user-namespace restriction prevents bwrap startup here.
+          # The pinned CLI supports equivalent read-only enforcement via Landlock.
+          pnpm dlx @openai/codex@0.153.2 \
+            -c use_legacy_landlock=true -c 'sandbox_mode="read-only"' sandbox -- \
+            sh -c 'cat AGENTS.md > /dev/null && if probe=$(mktemp "$PWD/.review-write-probe.XXXXXX"); then rm -- "$probe"; echo "Sandbox allowed a workspace write"; exit 1; else echo "Sandbox read passed; workspace write denied"; fi'
+          # Record effective tool flags without printing configuration or auth.
+          pnpm dlx @openai/codex@0.153.2 -c use_legacy_landlock=true features list |
+            awk '$1 == "shell_tool" || $1 == "unified_exec" || $1 == "use_legacy_landlock"' || echo "Tool feature diagnostics unavailable"
+          set +e
+          pnpm dlx @openai/codex@0.153.2 -c use_legacy_landlock=true exec \
+            --sandbox read-only --ephemeral --ignore-rules --skip-git-repo-check --color never --json \
             --output-schema .github/codex/review-schema.json \
             --output-last-message "$RUNNER_TEMP/verdict.json" \
-            - < .github/codex/review-prompt.md
-          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
-          jq -e '.verdict and (.findings | type == "array")' "$RUNNER_TEMP/verdict.json" > /dev/null
+            - < .github/codex/review-prompt.md | tee "$RUNNER_TEMP/review-events.jsonl"
+          codex_status=${PIPESTATUS[0]}
+          set -e
+          # Export even malformed output so the gate can explain the failure.
+          touch "$RUNNER_TEMP/verdict.json"
+          delimiter="CODEX_VERDICT_$(cat /proc/sys/kernel/random/uuid)"
           {
-            echo "verdict<<CODEX_VERDICT_EOF"
+            echo "verdict<<$delimiter"
             cat "$RUNNER_TEMP/verdict.json"
             echo
-            echo "CODEX_VERDICT_EOF"
+            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
+          test -s "$RUNNER_TEMP/verdict.json" || { echo "Codex wrote no verdict"; exit 1; }
+          exit "$codex_status"
 
       - name: Say whether the login refreshed itself
         if: always()
@@ -142,14 +190,19 @@ jobs:
     # since a skipped required check counts as passing.
     if: always() && needs.detect.outputs.deep == 'true' && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
+      # Required to check out the tested gate. This repository is public.
+      contents: read
       pull-requests: write
     steps:
-      - name: Fail when the review did not complete
-        env:
-          REVIEW_RESULT: ${{ needs.review.result }}
-        run: |
-          echo "review job: $REVIEW_RESULT"
-          test "$REVIEW_RESULT" = "success"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
 
       - name: Post the review as a comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -158,27 +211,41 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            let v;
-            try { v = JSON.parse(process.env.CODEX_VERDICT || ''); }
-            catch { v = { verdict: 'block', findings: [{ severity: 'P1', file: '', line: 0, issue: 'The reviewer returned no parseable verdict.', fix: 'Rerun the workflow or read the job log.' }] }; }
-            const lines = (v.findings || []).map(
-              f => `- **${f.severity}** \`${f.file}:${f.line}\` ${f.issue}\n  Fix: ${f.fix}`
-            );
+            // Keep this token-bearing action self-contained. Never import code
+            // from the PR checkout into a process holding a write token.
+            const raw = process.env.CODEX_VERDICT || '';
+            const escapeHtml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+            let summary = 'The reviewer returned no usable justification. Read the raw response and gate errors.';
+            try {
+              const value = JSON.parse(raw);
+              if (typeof value?.summary === 'string' && value.summary.trim()) summary = value.summary;
+            } catch {}
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `## Codex deep review: ${v.verdict}\n\n${lines.join('\n') || 'No findings.'}`,
+              body: `## Codex deep review response\n\n${escapeHtml(summary)}\n\n<details><summary>Raw last response</summary>\n<pre>${escapeHtml(raw)}</pre>\n</details>`,
             });
 
-      - name: Fail on any finding
+      - name: Enforce review verdict
+        if: always()
         env:
+          REVIEW_CI_EVIDENCE: ${{ needs.review.outputs.ci_evidence }}
           CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           printf '%s' "$CODEX_VERDICT" > verdict.json
-          count=$(jq '[.findings[]?] | length' verdict.json)
-          echo "findings: $count"
-          test "$count" -eq 0
+          # Changing enforcement requires a workflow edit and human review.
+          # Verify both policy inputs before executing code from this checkout.
+          printf '%s\n' \
+            '9855b486350ace04a16bd09390a30eb1a54017fc96d0398397323848508c2fd2  scripts/check-review-verdict.mjs' \
+            'b1898fbae9803bbba21e218fd2167a6cb8ed0331b1fc6890bd4f264232c2c32a  .github/codex/review-schema.json' |
+            sha256sum --check --strict
+          node scripts/check-review-verdict.mjs verdict.json "$REVIEW_BASE_SHA...$REVIEW_HEAD_SHA"
+          echo "review job: $REVIEW_RESULT"
+          test "$REVIEW_RESULT" = "success"
 
   fork-guard:
     name: codex-review-fork-guard
