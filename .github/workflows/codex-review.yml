@@ -1,0 +1,92 @@
+name: codex-review
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, synchronize, reopened, labeled]
+
+permissions: {}
+
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: codex-review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.run_codex.outputs['final-message'] }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+
+      - name: Fetch the base and head refs for the diff
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+
+      - name: Run Codex
+        id: run_codex
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          safety-strategy: drop-sudo
+          model: gpt-5.3-codex
+          effort: ${{ contains(github.event.pull_request.labels.*.name, 'deep-review') && 'high' || 'medium' }}
+          prompt-file: .github/codex/review-prompt.md
+          output-schema-file: .github/codex/review-schema.json
+
+  gate:
+    name: codex-review-gate
+    runs-on: ubuntu-latest
+    needs: review
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post the review as a comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            let v;
+            try { v = JSON.parse(process.env.CODEX_VERDICT || '{}'); }
+            catch { v = { verdict: 'block', findings: [{ severity: 'P1', file: '', line: 0, issue: 'The reviewer returned no parseable verdict.', fix: 'Rerun the workflow or read the job log.' }] }; }
+            const lines = (v.findings || []).map(
+              f => `- **${f.severity}** \`${f.file}:${f.line}\` ${f.issue}\n  Fix: ${f.fix}`
+            );
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## Codex review: ${v.verdict}\n\n${lines.join('\n') || 'No findings.'}`,
+            });
+
+      - name: Fail on any finding
+        env:
+          CODEX_VERDICT: ${{ needs.review.outputs.verdict }}
+        run: |
+          printf '%s' "$CODEX_VERDICT" > verdict.json
+          count=$(jq '[.findings[]?] | length' verdict.json)
+          echo "findings: $count"
+          test "$count" -eq 0
+
+  fork-guard:
+    name: codex-review-fork-guard
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Refuse to pass a fork pull request without a review
+        run: |
+          echo "This pull request comes from a fork, so the reviewer has no key and did not run."
+          echo "A maintainer reviews it by hand and merges with an admin override, or asks the author to open it from a branch."
+          exit 1
