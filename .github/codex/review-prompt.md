@@ -27,7 +27,8 @@ Every finding blocks the merge. The author fixes it or replies with a reason
 and a maintainer dismisses it. Set `verdict` to `block` when `findings` is
 non-empty and `pass` otherwise.
 
-When the pull request carries the `deep-review` label, also check the change
-against the module boundaries in `AGENTS.md`, look for shared mutable state
-between concurrent actors, and trace every write path to the single receipt
-function.
+This run happens only when the pull request crosses a breakpoint listed in
+`.github/codex/breakpoints.txt`, so also check the change against the
+module boundaries in `AGENTS.md`, look for shared mutable state between
+concurrent actors, trace every write path to the single receipt function,
+and confirm `pod.run` still has one call site.

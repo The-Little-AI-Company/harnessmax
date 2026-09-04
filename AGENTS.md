@@ -54,11 +54,17 @@ an em dash.
 
 ## Code review rules
 
-Codex reviews every pull request into `dev` from
-`.github/workflows/codex-review.yml`, following `.github/codex/review-prompt.md`
-and this section. Every finding blocks the merge. The author fixes it, or
-replies with the reason and a maintainer dismisses it. A finding is a
-defect with a file, a line, and a fix, never a preference.
+Codex reviews every pull request into `dev` twice over. The Codex cloud
+integration, on the maintainer's subscription, reviews every pull request
+and posts its findings. `.github/workflows/codex-review.yml` runs the deep
+review in CI, at high effort and scoped to the pull request's diff, only
+when the pull request crosses a breakpoint. `scripts/detect-breakpoint.mjs`
+decides that from the changed paths against `.github/codex/breakpoints.txt`,
+and the `deep-review` label forces it. Both follow
+`.github/codex/review-prompt.md` and this section. Every finding blocks
+the merge. The author fixes it, or replies with the reason and a
+maintainer dismisses it. A finding is a defect with a file, a line, and a
+fix, never a preference.
 
 Reviewers, human or model, check these in order:
 
@@ -75,12 +81,13 @@ Reviewers, human or model, check these in order:
 7. The change is the smallest one that solves the problem. No layer, wrapper,
    or option that has one caller.
 
-Breakpoints get a deeper review. Add the `deep-review` label to the pull
-request that closes any of these, and the reviewer runs at high effort with
-the boundary checks in the prompt: #4 (the shell), #8 (the first write),
-#11 (the sandbox), #13 (the desktop shell), #18 (the MCP server), and #14
-(the alpha). A maintainer also runs an adversarial multi-model review on
-those before merge.
+A breakpoint is any change under the paths in
+`.github/codex/breakpoints.txt`: the receipt write path, the pod runtime,
+the agent surface and gates, the workspace contract and folder interface,
+the MCP server, the Tauri shell, CI, scripts, and the dependency files.
+A maintainer also runs an adversarial multi-model review on those before
+merge. Add a path to the list in the same pull request that creates a new
+boundary.
 
 ## Dependencies
 
