@@ -451,6 +451,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       for (const name of ["to", "from", "values"]) {
         const raw = attributes.get(name) ?? "";
         for (const value of name === "values" ? raw.split(";") : [raw]) {
+          if (paint.test(target) && value.trim() && !value.includes("\0")) colors.push(value);
           if (/^(?:href|xlink:href|src)$/i.test(target)) reference(value, base, ambiguous.has(name));
           else if (/^(?:fill|stroke|filter|clip-path|mask|marker(?:-(?:start|mid|end))?|cursor)$/i.test(target)) {
             for (const url of urls(value, false)) reference(url, base, ambiguous.has(name));

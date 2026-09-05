@@ -743,3 +743,13 @@ test("HTML breakout tags restore HTML raw-text rules inside SVG", (t) => {
     assert.deepEqual(checkAssets(root), []);
   }
 });
+
+test("SVG animation paint values obey the icon color rule", (t) => {
+  const { root, put } = fixture(t);
+  for (const animation of ['<set attributeName="fill" to="red" begin="click"/>', '<animate attributeName="stroke" values="red;blue"/>']) {
+    put(icons, `export const icon = '<svg><path fill="currentColor">${animation}</path></svg>';`);
+    single(root, "icon-color");
+  }
+  put(icons, 'export const icon = \'<svg><path fill="currentColor"><set attributeName="fill" to="none"/><animate attributeName="stroke" values="currentColor;none"/></path></svg>\';');
+  assert.deepEqual(checkAssets(root), []);
+});
