@@ -875,3 +875,45 @@ test("markup-like JavaScript regex text does not define an icon", (t) => {
   put(icons, String.raw`export const pattern = /<path fill="red"\/>/; export const icon = '<path fill="none"/>';`);
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("htm files are scanned as HTML documents", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/page.htm", '<img src="https://example.test/a.png">');
+  single(root, "network-asset");
+});
+
+test("consecutive JSX literals establish the complete URL prefix", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.tsx", '<image href={"ht" + "tps://example.test/a.svg"}/>');
+  single(root, "network-asset");
+});
+
+test("CSS namespace identifiers are not asset requests", (t) => {
+  const { root, put } = fixture(t);
+  put("src/styles/test.css", '@namespace svg url(http://www.w3.org/2000/svg);');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("HTML URL attributes only load on their consuming elements", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<div src="https://example.test/inert.png" poster="https://example.test/inert.jpg" href="https://example.test/inert"></div>');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("standalone XML URL attribute names are case sensitive", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.svg", '<svg><image HREF="https://example.test/inert.svg"/></svg>');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("non-CSS style elements do not load CSS URLs", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<style type="text/plain">body{background:url(https://example.test/a.png)}</style>');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("HTML bogus comments keep nested tag text inert", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<?ignored <img src="https://example.test/a.png">?>');
+  assert.deepEqual(checkAssets(root), []);
+});

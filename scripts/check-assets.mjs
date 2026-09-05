@@ -20,7 +20,7 @@ const requiredAssets = [
 ];
 const rules = ["network-asset", "missing-asset", "unproven-font", "icon-color"];
 const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
-const sourceExtension = /\.(?:css|svg|[cm]?[jt]s|[jt]sx|html|xml|webmanifest)$/i;
+const sourceExtension = /\.(?:css|svg|[cm]?[jt]s|[jt]sx|html?|xml|webmanifest)$/i;
 const normalizeUrl = (value) => value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\r\n]/g, "").replace(/\\/g, "/");
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
@@ -167,9 +167,14 @@ function readTag(text, start, jsx) {
       const value = region.text.slice(1, -1).trim();
       const string = String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'`;
       const concatenation = value.match(new RegExp(`^(${string})(?:\\s*\\+\\s*(?:${string}|[a-z_$][\\w$]*(?:\\.[a-z_$][\\w$]*)*))+\\s*$`, "i"));
-      const prefix = concatenation && normalizeUrl(decodeJavascript(concatenation[1].slice(1, -1)));
+      let prefix = "", fullyStatic = Boolean(concatenation);
+      if (concatenation) for (const operand of value.matchAll(new RegExp(`${string}|[a-z_$][\\w$]*(?:\\.[a-z_$][\\w$]*)*`, "gi"))) {
+        if (!/^["']/.test(operand[0])) { fullyStatic = false; break; }
+        prefix += decodeJavascript(operand[0].slice(1, -1));
+      }
+      prefix = normalizeUrl(prefix);
       source += /\bstyle\s*=\s*$/i.test(source) && value.startsWith("{") ? `"${styleObject(value)}"`
-        : prefix && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(prefix) ? `"${prefix.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`
+        : fullyStatic || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(prefix) ? `"${prefix.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`
         : /^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`[^`$]*`)$/.test(value) ? region.text : "{}";
       index = region.end;
     } else {
@@ -207,6 +212,11 @@ function* markupElements(text, html, jsx) {
       cursor = end < 0 ? text.length : end + (foreign ? 3 : 1);
       continue;
     }
+    if (html && /^<[!?]/.test(text.slice(start))) {
+      const end = text.indexOf(">", start + 2);
+      cursor = end < 0 ? text.length : end + 1;
+      continue;
+    }
     const tag = readTag(text, start, jsx);
     if (!tag) { cursor = start + 1; continue; }
     cursor = tag.end;
@@ -231,13 +241,13 @@ function* markupElements(text, html, jsx) {
       const end = element === "plaintext" ? null : closing.exec(text);
       const content = text.slice(cursor, end?.index ?? text.length);
       cursor = end ? (html ? readTag(text, end.index, false).end : closing.lastIndex) : text.length;
-      yield { source: tag.source, css: element === "style" ? content : undefined, characterData: !html, complete: true };
+      yield { source: tag.source, namespace, css: element === "style" ? content : undefined, characterData: !html, complete: true };
     } else {
       if (element && !selfClosing && !(namespace === "html" && /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(element))) {
         const children = namespace === "svg" && /^(?:foreignobject|desc|title)$/.test(element) ? "html" : namespace;
         scopes.push({ element, children, css: html && element === "style" && namespace !== "html" ? "" : undefined });
       }
-      yield { source: tag.source, complete: selfClosing };
+      yield { source: tag.source, namespace, complete: selfClosing };
     }
   }
   for (const scope of scopes) if (scope.css !== undefined) yield { source: "", css: scope.css, characterData: true, complete: true };
@@ -331,11 +341,15 @@ function urls(text, stylesheet) {
   const identifier = String.raw`((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\(`;
   const strings = "|" + cssStrings;
   const imports = String.raw`|@((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')`;
-  const tokens = new RegExp(identifier + (stylesheet ? imports + strings + "|[()]" : ""), "gi");
+  const atRules = String.raw`|@((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)`;
+  const tokens = new RegExp(identifier + (stylesheet ? imports + atRules + strings + "|[();{}]" : ""), "gi");
   const argument = /\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^)"'])+))\s*\)/y;
   const functions = [];
+  let atRule;
   let token;
   while ((token = tokens.exec(text))) {
+    if (token[5]) { atRule = decodeCss(token[5]).toLowerCase(); continue; }
+    if (/^[;{}]$/.test(token[0])) { atRule = undefined; continue; }
     if (stylesheet && token[2]) {
       if (decodeCss(token[2]).toLowerCase() === "import") values.push(decodeCss(token[3] ?? token[4]));
       continue;
@@ -352,7 +366,7 @@ function urls(text, stylesheet) {
     argument.lastIndex = tokens.lastIndex;
     const match = argument.exec(text);
     if (!match) continue;
-    values.push(decodeCss((match[1] ?? match[2] ?? match[3]).trim()));
+    if (atRule !== "namespace") values.push(decodeCss((match[1] ?? match[2] ?? match[3]).trim()));
     tokens.lastIndex = argument.lastIndex;
   }
   return values;
@@ -443,7 +457,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     return paints;
   }
   const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]) }];
-  for (const { source, css, characterData, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
+  for (const { source, namespace, css, characterData, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
     const sourceElement = source.match(/^<\/?([\w:-]+)/)?.[1];
     const element = html ? sourceElement?.toLowerCase() : sourceElement;
     if (source.startsWith("</")) {
@@ -483,20 +497,28 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     if (attributes.has("xml:base") && !attributes.get("xml:base").includes("\0")) {
       try { base = scopedBase = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
-    if (css !== undefined) {
+    const styleType = element === "style" ? (html ? htmlAttributes.get("type") : attributes.get("type")) : scopes.findLast((scope) => scope.element === "style")?.styleType;
+    if (css !== undefined && /^(?:text\/css)?$/i.test(styleType?.trim() ?? "")) {
       const unknownEntities = new Set();
       const decoded = characterData ? css.split(/(<!\[CDATA\[[\s\S]*?(?:\]\]>|$))/).map((part) => part.startsWith("<![CDATA[") ? part.slice(9).replace(/\]\]>$/, "") : decodeEntities(part, html, (entity) => unknownEntities.add(entity))).join("") : css;
       stylesheet(decoded, base, true, unknownEntities);
     }
     let inlineFill;
     for (const [name, value] of attributes) {
+      const urlName = html ? name.toLowerCase() : name;
+      const svg = namespace === "svg" || (!/\.html?$/i.test(file) && /^(?:svg|image|use|feimage|mpath|textpath|lineargradient|radialgradient|pattern|animate|set)$/i.test(element ?? ""));
+      const directUrl = !html ? /^(?:href|src|poster)$/.test(name)
+        : urlName === "src" ? /^(?:audio|bgsound|embed|frame|iframe|image|img|input|script|source|track|video)$/.test(element ?? "")
+        : urlName === "poster" ? element === "video"
+        : urlName === "href" && (svg || /^(?:a|area|base|link)$/.test(element ?? ""));
+      const [prefix, local] = urlName.split(":");
+      const xlink = local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink" && (!html || svg);
       if (value.includes("\0")) {
-        if (/^(?:href|src|poster|xlink:href)$/i.test(name)) reference(value, base);
+        if (directUrl || xlink) reference(value, base);
         continue;
       }
       if (html && element?.toLowerCase() === "base" && name.toLowerCase() === "href") continue;
-      const [prefix, local] = (html ? name.toLowerCase() : name).split(":");
-      if (/^(?:href|src|poster)$/i.test(name) || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base, ambiguous.has(name));
+      if (directUrl || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || xlink || (object && urlName === "data")) reference(value, base, ambiguous.has(name));
       if (/^(?:srcset|imagesrcset)$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));
       if (html && name.toLowerCase() === "background" && /^(?:body|table|tr|th|td)$/i.test(element ?? "")) reference(value, base, ambiguous.has(name));
       if (name === "xml:base" && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) references.push(value);
@@ -532,7 +554,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
       if (refresh) reference(refresh[1].trim(), base);
     }
-    if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base: scopedBase, paintNode });
+    if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base: scopedBase, paintNode, styleType });
   }
   for (const node of paintNodes) {
     let styled, specificity = -1;
