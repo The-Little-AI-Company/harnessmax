@@ -442,3 +442,18 @@ test("XLink namespace aliases apply within their declared scope", (t) => {
   put("src/assets/identity/mark.svg", '<svg xmlns:x="http://www.w3.org/1999/xlink"><g xmlns:x="urn:other"><image x:href="https://example.test/a"/></g></svg>');
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("unresolved JSX expressions are not invented filenames", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", "<svg/>");
+  put("src/app/icons/extra.tsx", 'const localIcon = "../../assets/local.svg"; export const icon = <image href={localIcon}/>;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("relative XML bases apply to descendants and restore at closing tags", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/logo#mark.svg", "<svg/>");
+  put("src/assets/logo%mark.svg", "<svg/>");
+  put("src/assets/identity/mark.svg", '<svg xml:base="../"><image href="logo%23mark.svg"/><image href="logo%25mark.svg"/><image href="fonts/OFL.txt"/><g xml:base="fonts/"><image href="OFL.txt"/><style>svg{filter:url(OFL.txt)}</style></g><image href="fonts/OFL.txt"/></svg>');
+  assert.deepEqual(checkAssets(root), []);
+});

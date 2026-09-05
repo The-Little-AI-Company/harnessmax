@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const requiredAssets = [
   "src/assets/fonts/Archivo-Variable.woff2",
@@ -207,36 +207,48 @@ function srcsetUrls(value) {
   return sources;
 }
 
-function inspectMarkup(text) {
+function inspectMarkup(text, file, inheritedBase) {
   const references = [];
   const colors = [];
+  function reference(value, base) {
+    if (!base || !value || value.startsWith("#") || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(value)) {
+      references.push(value);
+      return;
+    }
+    try {
+      const target = new URL(value, base);
+      references.push(target.protocol === "file:" ? relative(dirname(file), fileURLToPath(target)).split(sep).map(encodeURIComponent).join("/") : target.href);
+    } catch {
+      references.push(value);
+    }
+  }
   const paint = /^(?:fill|stroke|color|stop-color|flood-color|lighting-color)$/i;
-  function stylesheet(text) {
+  function stylesheet(text, base) {
     const { active } = splitComments(text.replace(/\r\n?|\f/g, "\n"));
-    references.push(...urls(active, true));
+    for (const value of urls(active, true)) reference(value, base);
     const declarations = /(?:^|[;{])\s*((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*:\s*([^;}]+)/gi;
     const withoutStrings = active.replace(new RegExp(cssStrings, "g"), '""');
     for (const match of withoutStrings.matchAll(declarations)) {
       if (paint.test(decodeCss(match[1]))) colors.push(decodeCss(match[2]));
     }
   }
-  const markup = text.replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi, (_, css) => {
-    if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"));
-    return "";
-  });
-  const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]) }];
-  for (const match of markup.matchAll(/<(?:\/?[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
-    const element = match[0].match(/^<\/?([\w:-]+)/)?.[1];
-    if (match[0].startsWith("</")) {
+  const markup = text.replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi,
+    (whole, css) => css === undefined ? "" : whole);
+  const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]), base: inheritedBase }];
+  for (const match of markup.matchAll(/<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)(?:<\/style\s*>|$)|<(?:\/?[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
+    const source = match[1] === undefined ? match[0] : match[0].match(/^<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>/i)[0];
+    const element = source.match(/^<\/?([\w:-]+)/)?.[1];
+    if (source.startsWith("</")) {
       const index = scopes.findLastIndex((scope) => scope.element === element);
       if (index > 0) scopes.length = index;
       continue;
     }
     const namespaces = new Map(scopes.at(-1).namespaces);
     const attributes = new Map();
-    const object = /^<object\b/i.test(match[0]);
-    const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(\{\s*(?:"[^"]*"|'[^']*'|`[^`]*`)\s*\}|"[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (attribute, name, raw) => {
+    const object = /^<object\b/i.test(source);
+    const tag = source.replace(/\b([\w:-]+)\s*=\s*(\{(?:"[^"]*"|'[^']*'|`[^`]*`|[^}])*\}|"[^"]*"|'[^']*'|[^\s"'=<>`{]+)/g, (attribute, name, raw) => {
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
+      if (raw.startsWith("{") && !/^(?:"[^"]*"|'[^']*'|`[^`$]*`)$/.test(literal)) return "";
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
       // JSX expression strings contain JavaScript text, not XML entities.
       if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, name) => {
@@ -248,26 +260,31 @@ function inspectMarkup(text) {
       if (name.startsWith("xmlns:")) namespaces.set(name.slice(6), value);
       return name.toLowerCase() === "style" ? "" : attribute;
     });
+    let base = scopes.at(-1).base;
+    if (attributes.has("xml:base")) {
+      try { base = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
+    }
+    if (match[1] !== undefined) stylesheet(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base);
     for (const [name, value] of attributes) {
       const [prefix, local] = name.split(":");
-      if (/^(?:href|src|poster)$/i.test(name) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) references.push(value);
-      if (/^srcset$/i.test(name)) references.push(...srcsetUrls(value));
+      if (/^(?:href|src|poster)$/i.test(name) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base);
+      if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base);
       if (name === "xml:base" && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) references.push(value);
       if (name.toLowerCase() === "srcdoc") {
-        const nested = inspectMarkup(value);
+        const nested = inspectMarkup(value, file, base);
         references.push(...nested.references);
         if (nested.color) colors.push(nested.color);
       }
       if (paint.test(name)) colors.push(value);
-      if (name.toLowerCase() === "style") stylesheet(value);
+      if (name.toLowerCase() === "style") stylesheet(value, base);
     }
     const htmlAttributes = new Map([...attributes].map(([name, value]) => [name.toLowerCase(), value]));
     if (element?.toLowerCase() === "meta" && htmlAttributes.get("http-equiv")?.toLowerCase() === "refresh") {
       const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
-      if (refresh) references.push(refresh[1].trim());
+      if (refresh) reference(refresh[1].trim(), base);
     }
-    if (!/\/>$/.test(match[0]) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces });
-    references.push(...urls(tag, false));
+    if (match[1] === undefined && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base });
+    for (const value of urls(tag, false)) reference(value, base);
   }
   return { references, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
 }
@@ -363,7 +380,7 @@ export function checkAssets(root) {
     }
     // Serialized icon markup is inspected as text, never imported or executed.
     const content = javascript ? active.replace(/\\(["'])/g, "$1") : active;
-    const inspected = isStylesheet ? { references: urls(content, true) } : inspectMarkup(content);
+    const inspected = isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file);
     for (const url of new Set(inspected.references)) {
       if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) {
         add(localPath(file), "network-asset", `URL uses a scheme or network address: ${url}`, "Vendor the asset and use a relative local URL.");
