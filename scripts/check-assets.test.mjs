@@ -662,3 +662,20 @@ test("plain-text asset examples are not parsed as markup", (t) => {
   put("src/assets/example.txt", "Documentation: <img src=https://example.test/a>");
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("ordinary markup attributes do not contain CSS asset requests", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<div title="url(missing.png)" aria-label="url(https://example.test/help)"></div>');
+  assert.deepEqual(checkAssets(root), []);
+  put("src/assets/test.svg", '<svg><path filter="url(https://example.test/filter)"/></svg>');
+  single(root, "network-asset");
+});
+
+test("CSS string continuations resolve the joined local filename", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/logo.svg", '<svg/>');
+  for (const newline of ["\n", "\r\n", "\r", "\f"]) {
+    put("src/styles/test.css", `body{background:url("../assets/lo\\${newline}go.svg")}`);
+    assert.deepEqual(checkAssets(root), []);
+  }
+});

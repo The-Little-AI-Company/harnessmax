@@ -45,9 +45,9 @@ function controlContext() {
 }
 
 function decodeCss(text) {
-  return text.replace(/\\(?:([\da-f]{1,6})\s?|([\s\S]))/gi, (_, hex, char) => {
+  return text.replace(/\\(?:([\da-f]{1,6})\s?|(\r\n|[\s\S]))/gi, (_, hex, char) => {
     const point = hex && Number.parseInt(hex, 16);
-    return hex ? String.fromCodePoint(point > 0 && point <= 0x10ffff ? point : 0xfffd) : char;
+    return hex ? String.fromCodePoint(point > 0 && point <= 0x10ffff ? point : 0xfffd) : /^[\r\n\f]+$/.test(char) ? "" : char;
   });
 }
 
@@ -363,7 +363,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     const attributes = new Map();
     const ambiguous = new Set();
     const object = /^<object\b/i.test(source);
-    const tag = source.replace(/\b([\w:-]+)\s*=\s*(\{(?:"[^"]*"|'[^']*'|`[^`]*`|[^}])*\}|"[^"]*"|'[^']*'|[^\s"'=<>`{]+)/g, (attribute, name, raw) => {
+    source.replace(/\b([\w:-]+)\s*=\s*(\{(?:"[^"]*"|'[^']*'|`[^`]*`|[^}])*\}|"[^"]*"|'[^']*'|[^\s"'=<>`{]+)/g, (attribute, name, raw) => {
       if ([...attributes.keys()].some((key) => key.toLowerCase() === name.toLowerCase())) return "";
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
       if (raw.startsWith("{") && !/^(?:"[^"]*"|'[^']*'|`[^`$]*`)$/.test(literal)) return "";
@@ -416,6 +416,9 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
         if (nested.color) colors.push(nested.color);
       }
       if (paint.test(name)) colors.push(value);
+      if (/^(?:fill|stroke|filter|clip-?path|mask|marker(?:-?(?:start|mid|end))?|cursor)$/i.test(name)) {
+        for (const target of urls(value, false)) reference(target, base, ambiguous.has(name));
+      }
       if (name.toLowerCase() === "style") inlineFill = stylesheet(value, base).get("fill");
     }
     const paintNode = { element, attributes, inlineFill, parent: scopes.at(-1).paintNode };
@@ -425,7 +428,6 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       if (refresh) reference(refresh[1].trim(), base);
     }
     if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base: scopedBase, paintNode });
-    for (const value of urls(tag, false)) reference(value, base);
   }
   for (const node of paintNodes) {
     let styled, specificity = -1;
