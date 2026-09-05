@@ -12,7 +12,7 @@ as models improve.
 
 ## Status
 
-Planning. No code yet. Development starts with the console shell and a
+Planning. Development starts with the console shell and a
 storage benchmark, and the first public alpha is the goal of the current
 appetite. Watch the issue tracker.
 
