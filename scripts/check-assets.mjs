@@ -21,6 +21,7 @@ const requiredAssets = [
 const rules = ["network-asset", "missing-asset", "unproven-font", "icon-color"];
 const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
 
 function decodeCss(text) {
   return text.replace(/\\(?:([\da-f]{1,6})\s?|([\s\S]))/gi, (_, hex, char) => {
@@ -30,20 +31,48 @@ function decodeCss(text) {
 }
 
 // Consume quoted strings as units, so comment markers inside strings survive.
-function splitComments(text) {
+function splitComments(text, javascript = false, jsx = false) {
   const comments = [];
-  const active = text.replace(/\/\*[\s\S]*?(?:\*\/|$)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/g, (token) => {
-    if (!token.startsWith("/*")) return token;
-    comments.push(token.slice(2).replace(/\*\/$/, ""));
-    return " ";
-  });
-  return { active, comments };
+  const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60(?:\\[\s\S]|[^\x60\\])*\x60|//[^\r\n]*` : cssStrings;
+  const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
+  const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
+  let active = "", cursor = 0, depth = 0;
+  const expressions = [];
+  let match;
+  while ((match = tokens.exec(text))) {
+    active += text.slice(cursor, match.index);
+    let token = match[0];
+    const expression = expressions.at(-1);
+    const markupText = depth > 0 && (!expression || depth > expression.depth);
+    if (jsx && token.startsWith("<")) {
+      if (token.startsWith("</")) depth = Math.max(0, depth - 1);
+      else if (!token.endsWith("/>")) depth++;
+    } else if (jsx && token === "{" && depth > 0) {
+      if (markupText) expressions.push({ depth, braces: 1 });
+      else expression.braces++;
+    } else if (jsx && token === "}" && expression) {
+      if (--expression.braces === 0) expressions.pop();
+    } else if (markupText) {
+      // Quotes and JS comment markers are text here. Resume inside the token
+      // so tags between those markers still update the JSX nesting depth.
+      token = token.slice(0, 1);
+      tokens.lastIndex = match.index + 1;
+    } else if (javascript && token.startsWith("//")) {
+      token = " ";
+    } else if (token.startsWith("/*")) {
+      comments.push(token.slice(2).replace(/\*\/$/, ""));
+      token = " ";
+    }
+    active += token;
+    cursor = tokens.lastIndex;
+  }
+  return { active: active + text.slice(cursor), comments };
 }
 
 function urls(text, stylesheet) {
   const values = [];
   const identifier = String.raw`((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\(`;
-  const strings = String.raw`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'`;
+  const strings = "|" + cssStrings;
   const imports = String.raw`|@((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')`;
   const tokens = new RegExp(identifier + (stylesheet ? imports + strings + "|[()]" : ""), "gi");
   const argument = /\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^)"'])+))\s*\)/y;
@@ -72,12 +101,30 @@ function urls(text, stylesheet) {
   return values;
 }
 
-function iconColor(text) {
-  const markup = text.replace(/\\(["'])/g, "$1");
+function inspectMarkup(text) {
+  const references = [];
   const colors = [];
-  for (const match of markup.matchAll(/\b(fill|stroke|color|stop-color|flood-color|lighting-color)\s*=\s*(["'])([\s\S]*?)\2/gi)) colors.push(match[3]);
-  for (const match of markup.matchAll(/\b(?:fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;"'}]+)/gi)) colors.push(match[1]);
-  return colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim()));
+  const paint = /^(?:fill|stroke|color|stop-color|flood-color|lighting-color)$/i;
+  function stylesheet(text) {
+    const { active } = splitComments(text);
+    references.push(...urls(active, true));
+    for (const match of active.matchAll(/\b(?:fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;}]+)/gi)) colors.push(match[1]);
+  }
+  const markup = text.replace(/<!--[\s\S]*?-->/g, "").replace(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi, (_, css) => {
+    stylesheet(css);
+    return "";
+  });
+  for (const match of markup.matchAll(/<[a-z][\w:-]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
+    const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g, (attribute, name, double, single, bare) => {
+    const value = (double ?? single ?? bare).trim();
+    if (/^(?:href|xlink:href|src)$/i.test(name)) references.push(value);
+    if (paint.test(name)) colors.push(value);
+    if (name.toLowerCase() === "style") stylesheet(value);
+    return name.toLowerCase() === "style" ? "" : attribute;
+    });
+    references.push(...urls(tag, false));
+  }
+  return { references, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
 }
 
 export function checkAssets(root) {
@@ -145,9 +192,11 @@ export function checkAssets(root) {
       fonts.push([file, bytes]);
       continue;
     }
-    if (!/\.(?:css|svg|[cm]?js|ts|json|txt|html|xml)$/i.test(file)) continue;
+    if (!/\.(?:css|svg|[cm]?js|[jt]sx?|json|txt|html|xml)$/i.test(file)) continue;
     const text = bytes.toString("utf8");
-    const { active, comments } = splitComments(text);
+    const isStylesheet = extname(file).toLowerCase() === ".css";
+    const javascript = /\.(?:[cm]?js|[jt]sx?)$/i.test(file);
+    const { active, comments } = isStylesheet || javascript ? splitComments(text, javascript, /\.[jt]sx$/i.test(file)) : { active: text, comments: [] };
     if (localPath(file) === "src/styles/tokens/fonts.css") {
       for (const comment of comments) {
         for (const line of comment.split(/\r?\n/)) {
@@ -168,15 +217,9 @@ export function checkAssets(root) {
       }
     }
     // Serialized icon markup is inspected as text, never imported or executed.
-    const content = file.endsWith(".ts") ? active.replace(/\\(["'])/g, "$1") : active;
-    const isStylesheet = extname(file).toLowerCase() === ".css";
-    const urlText = isStylesheet ? content : content.replace(/<!--[\s\S]*?-->/g, "");
-    // Markup attributes and TS strings contain CSS URLs, unlike CSS string values.
-    const extracted = urls(urlText, isStylesheet);
-    if (!isStylesheet) {
-      for (const match of urlText.matchAll(/\b(?:href|xlink:href|src)\s*=\s*(["'])([\s\S]*?)\1/gi)) extracted.push(match[2].trim());
-    }
-    for (const url of extracted) {
+    const content = javascript ? active.replace(/\\(["'])/g, "$1") : active;
+    const inspected = isStylesheet ? { references: urls(content, true) } : inspectMarkup(content);
+    for (const url of new Set(inspected.references)) {
       if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) {
         add(localPath(file), "network-asset", `URL uses a scheme or network address: ${url}`, "Vendor the asset and use a relative local URL.");
       } else if (url && !url.startsWith("#")) {
@@ -189,7 +232,7 @@ export function checkAssets(root) {
       }
     }
     if (localPath(file) === "src/app/icons/icons.ts") {
-      const color = iconColor(urlText);
+      const color = inspected.color;
       if (color) add(localPath(file), "icon-color", `Icon uses fixed paint: ${color}`, "Use currentColor for icon paint. Use none for unpainted shapes.");
     }
   }

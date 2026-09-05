@@ -217,3 +217,79 @@ test("quoted image-set sources are checked without treating type strings as path
     else assert.deepEqual(checkAssets(root), []);
   }
 });
+
+test("CSS resumes scanning after a bad string's raw newline", (t) => {
+  const { root, put, css } = fixture(t);
+  for (const newline of ["\n", "\r", "\f"]) {
+    put(stylesheet, `${css}\n.bad{content:"x${newline};}.good{background:url(https://example.test/a);content:"y"}`);
+    single(root, "network-asset");
+  }
+});
+
+test("embedded SVG CSS checks quoted imports and image-set sources", (t) => {
+  const { root, put } = fixture(t);
+  for (const css of ['@import "https://example.test/a.css";', 'svg{background:image-set("https://example.test/a.png" 1x)}']) {
+    put("src/assets/identity/mark.svg", `<svg><style>${css}</style></svg>`);
+    single(root, "network-asset");
+  }
+});
+
+test("unquoted markup URL attributes are checked", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", "<img src=https://example.test/a.png>");
+  single(root, "network-asset");
+});
+
+test("unquoted icon paint is checked", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, "export const icons = { box: `<path stroke=red />` };");
+  single(root, "icon-color");
+});
+
+test("CSS comment delimiters are ordinary markup text", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg>/*<image href="https://example.test/a.svg"/>*/</svg>');
+  single(root, "network-asset");
+});
+
+test("JSX and TSX vendored files are scanned", (t) => {
+  const { root, put } = fixture(t);
+  for (const extension of ["jsx", "tsx"]) {
+    const path = `src/app/icons/extra.${extension}`;
+    put(path, 'export const icon = <image href="https://example.test/a.svg"/>;');
+    single(root, "network-asset");
+    rmSync(join(root, path));
+  }
+});
+
+test("JavaScript comments are inactive while string and template URLs survive", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, '// const old = \'<path stroke="red" href="https://example.test/a"/>\';\nexport const icons = {};');
+  assert.deepEqual(checkAssets(root), []);
+  for (const quote of ["'", "`", '"']) {
+    const markup = quote === '"' ? '<image href=\\"//example.test/a\\"/>' : '<image href="//example.test/a"/>';
+    put(icons, `export const icons = { box: ${quote}${markup}${quote} };`);
+    single(root, "network-asset");
+  }
+});
+
+test("serialized markup is inspected inside a direct JavaScript string assignment", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, 'export const icon = "<path stroke=\\"red\\"/>";');
+  single(root, "icon-color");
+});
+
+test("JSX text preserves comment markers while expression comments stay inactive", (t) => {
+  const { root, put } = fixture(t);
+  const path = "src/app/icons/extra.tsx";
+  put(path, 'export const icon = <svg>/*<g><image href="https://example.test/a.svg"/></g>*/</svg>;');
+  single(root, "network-asset");
+  put(path, 'export const icon = <svg>{/* <image href="https://example.test/a.svg"/> */}</svg>;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("JavaScript assignments outside markup are not paint or asset attributes", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, 'const color = "red"; const src = "https://example.test/a"; const example = "url(https://example.test/not-rendered)"; export const icons = { box: `<path stroke="currentColor"/>` };');
+  assert.deepEqual(checkAssets(root), []);
+});
