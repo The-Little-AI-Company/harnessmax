@@ -753,3 +753,53 @@ test("SVG animation paint values obey the icon color rule", (t) => {
   put(icons, 'export const icon = \'<svg><path fill="currentColor"><set attributeName="fill" to="none"/><animate attributeName="stroke" values="currentColor;none"/></path></svg>\';');
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("HTML template end tags are case insensitive", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/image.png", "fixture image");
+  put("src/assets/test.html", '<template><base href="local/"></TEMPLATE><base href="https://example.test/"><img src="image.png">');
+  assert.ok(checkAssets(root).some((finding) => finding.rule === "network-asset"));
+});
+
+test("HTML SVG style contents preserve foreign breakout tags", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<svg><style><img src="https://example.test/a">');
+  single(root, "network-asset");
+});
+
+test("HTML SVG animation attribute names are case insensitive", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", '<svg/>');
+  put("src/assets/test.html", '<svg><image href="local.svg"><set attributename="href" TO="https://example.test/a.svg"/></image></svg>');
+  single(root, "network-asset");
+});
+
+test("new can precede a JavaScript regex literal", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.ts", 'const x = new /[/*]/.constructor(); export const icon = `<image href="https://example.test/a"/>`;');
+  single(root, "network-asset");
+});
+
+test("known network prefixes survive unresolved template targets", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.ts", 'const host = "example.test"; export const icon = `<image href="https://${host}/a.svg"/>`;');
+  single(root, "network-asset");
+});
+
+test("static JSX style object values are inspected", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.tsx", '<div style={{ backgroundImage: "url(https://example.test/a.png)" }}/>');
+  single(root, "network-asset");
+});
+
+test("HTML CDATA-like declarations end at the first closing angle", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<div><![CDATA[><img src="https://example.test/a.png">]]></div>');
+  single(root, "network-asset");
+});
+
+test("foreign SVG style text joins across HTML comment nodes", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<svg><style>svg{filter:url("https://example.test/a<!--split-->")}</style></svg>');
+  single(root, "network-asset");
+});
