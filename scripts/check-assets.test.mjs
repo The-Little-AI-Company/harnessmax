@@ -370,4 +370,75 @@ test("markup character references decode before resolving asset paths", (t) => {
   assert.deepEqual(checkAssets(root), []);
   put("src/assets/identity/mark.svg", '<svg><image href="&#104;ttps://example.test/a"/></svg>');
   single(root, "network-asset");
+  put("src/assets/identity/mark.svg", "<svg/>");
+  put(icons, 'export const icon = `<path stroke="current&#x43;olor"/>`;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("CSS hex escapes consume CRLF as one newline", (t) => {
+  const { root, put, css } = fixture(t);
+  put(stylesheet, css + '\nbody{background:\\75\r\nrl(https://example.test/a)}');
+  single(root, "network-asset");
+});
+
+test("HTML style elements continue through end of file", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<style>@import "https://example.test/a.css";');
+  single(root, "network-asset");
+});
+
+test("srcdoc documents are decoded and inspected recursively", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<iframe srcdoc="&lt;img src=https://example.test/a&gt;"></iframe>');
+  single(root, "network-asset");
+});
+
+test("regex literals after control headers preserve later markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const header of ['if (flag)', 'while (ready())', 'for (const x of xs)', 'for await (const x of xs)', 'if (fn("(") && /[)]/.test(value))']) {
+    put(icons, `${header} /[/*]/.test("x"); export const icon = \`<image href="https://example.test/a"/>\`;`);
+    single(root, "network-asset");
+  }
+  put(icons, 'export const icon = `<svg>${(() => { if (flag) /[/*]/.test("x"); return ""; })()}<image href="https://example.test/a"/></svg>`;');
+  single(root, "network-asset");
+  put(icons, 'const quotient = fn() / divisor; export const icon = `<image href="https://example.test/a"/>`;');
+  single(root, "network-asset");
+});
+
+test("network XML bases are rejected even for fragment references", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg xml:base="https://example.test/sprite.svg"><use href="#icon"/></svg>');
+  single(root, "network-asset");
+});
+
+test("escaped CSS paint property identifiers cannot hide fixed colors", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, String.raw`export const icon = '<path style="st\72 oke:red"/>';`);
+  single(root, "icon-color");
+  put(icons, 'export const icon = `<svg><style>.label{content:";stroke:red"}.shape{stroke:currentColor}</style></svg>`;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("CDATA text is inactive markup but remains active inside SVG styles", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg><![CDATA[<image href="https://example.test/a"/>]]></svg>');
+  assert.deepEqual(checkAssets(root), []);
+  put("src/assets/identity/mark.svg", '<svg><style><![CDATA[@import "https://example.test/a.css";]]></style></svg>');
+  single(root, "network-asset");
+});
+
+test("meta refresh targets are checked regardless of attribute order", (t) => {
+  const { root, put } = fixture(t);
+  for (const attrs of ['http-equiv="refresh" content="0;url=https://example.test/a"', 'content="0; URL=\'https://example.test/a\'" http-equiv="Refresh"']) {
+    put("src/assets/test.html", `<meta ${attrs}>`);
+    single(root, "network-asset");
+  }
+});
+
+test("XLink namespace aliases apply within their declared scope", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg xmlns:x="http://www.w3.org/1999/xlink"><image x:href="https://example.test/a"/></svg>');
+  single(root, "network-asset");
+  put("src/assets/identity/mark.svg", '<svg xmlns:x="http://www.w3.org/1999/xlink"><g xmlns:x="urn:other"><image x:href="https://example.test/a"/></g></svg>');
+  assert.deepEqual(checkAssets(root), []);
 });

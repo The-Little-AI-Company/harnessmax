@@ -25,6 +25,21 @@ const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\
 const regexLiteral = String.raw`/(?![/*])(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\[\\\r\n])+/[a-z]*`;
 const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await))\s*$/;
 
+function controlContext() {
+  const parentheses = [];
+  let pending = "";
+  return {
+    closed: false,
+    consume(token, prefix) {
+      if (!token.trim()) return;
+      this.closed = token === ")" && parentheses.pop() === true;
+      if (token === "(") parentheses.push(Boolean(pending));
+      pending = token === "await" && pending === "for" ? pending
+        : /^(?:if|while|for|with|switch|catch)$/.test(token) && !/\.\s*$/.test(prefix) ? token : "";
+    },
+  };
+}
+
 function decodeCss(text) {
   return text.replace(/\\(?:([\da-f]{1,6})\s?|([\s\S]))/gi, (_, hex, char) => {
     const point = hex && Number.parseInt(hex, 16);
@@ -36,8 +51,10 @@ function decodeCss(text) {
 // Keep strings and nested templates intact while removing expression comments.
 function templateLiteral(text, start) {
   let result = "`", index = start + 1, braces = 0;
+  let context = controlContext();
   while (index < text.length) {
     const char = text[index];
+    const previous = result;
     if (char === "\\") {
       result += text.slice(index, index + 2);
       index += 2;
@@ -47,6 +64,7 @@ function templateLiteral(text, start) {
       result += "${";
       index += 2;
       braces = 1;
+      context = controlContext();
     } else if (braces && text.startsWith("/*", index)) {
       const end = text.indexOf("*/", index + 2);
       index = end < 0 ? text.length : end + 2;
@@ -55,7 +73,7 @@ function templateLiteral(text, start) {
       const end = text.slice(index).search(/[\r\n]/);
       index = end < 0 ? text.length : index + end;
       result += " ";
-    } else if (braces && char === "/" && regexContext.test(result)) {
+    } else if (braces && char === "/" && (regexContext.test(result) || context.closed)) {
       const literal = text.slice(index).match(new RegExp("^" + regexLiteral, "i"))?.[0] ?? char;
       result += literal;
       index += literal.length;
@@ -72,12 +90,17 @@ function templateLiteral(text, start) {
         if (next === "\\" && index < text.length) result += text[index++];
         else if (next === quote) break;
       }
+    } else if (braces && /[a-z_$]/i.test(char)) {
+      const identifier = text.slice(index).match(/^[\w$]+/)[0];
+      result += identifier;
+      index += identifier.length;
     } else {
       if (braces && char === "{") braces++;
       if (braces && char === "}") braces--;
       result += char;
       index++;
     }
+    if (braces) context.consume(result.slice(previous.length), previous);
   }
   return { text: result, end: index };
 }
@@ -85,15 +108,17 @@ function templateLiteral(text, start) {
 // Consume quoted strings as units, so comment markers inside strings survive.
 function splitComments(text, javascript = false, jsx = false) {
   const comments = [];
-  const regex = String.raw`(?:^|(?<=[({[=,:;!?&|+*%^~<>-])|\b(?:return|throw|case|delete|void|typeof|yield|await)\s+)\s*` + regexLiteral;
-  const strings = javascript ? regex + String.raw`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*` : cssStrings;
+  const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[()/]` : cssStrings;
   const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
   let active = "", cursor = 0, depth = 0;
   const expressions = [];
+  const context = controlContext();
   let match;
   while ((match = tokens.exec(text))) {
-    active += text.slice(cursor, match.index);
+    const gap = text.slice(cursor, match.index);
+    active += gap;
+    if (javascript) context.consume(gap, active.slice(0, -gap.length));
     let token = match[0];
     const expression = expressions.at(-1);
     const markupText = depth > 0 && (!expression || depth > expression.depth);
@@ -116,12 +141,19 @@ function splitComments(text, javascript = false, jsx = false) {
       const literal = templateLiteral(text, match.index);
       token = literal.text;
       tokens.lastIndex = literal.end;
+    } else if (javascript && token === "/" && (regexContext.test(active) || context.closed || !active.trim())) {
+      const literal = text.slice(match.index).match(new RegExp("^" + regexLiteral, "i"))?.[0];
+      if (literal) {
+        token = literal;
+        tokens.lastIndex = match.index + literal.length;
+      }
     } else if (javascript && token.startsWith("//")) {
       token = " ";
     } else if (token.startsWith("/*")) {
       comments.push(token.slice(2).replace(/\*\/$/, ""));
       token = " ";
     }
+    if (javascript && !markupText) context.consume(token, active);
     active += token;
     cursor = tokens.lastIndex;
   }
@@ -129,6 +161,7 @@ function splitComments(text, javascript = false, jsx = false) {
 }
 
 function urls(text, stylesheet) {
+  text = text.replace(/\r\n?|\f/g, "\n");
   const values = [];
   const identifier = String.raw`((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\(`;
   const strings = "|" + cssStrings;
@@ -179,15 +212,28 @@ function inspectMarkup(text) {
   const colors = [];
   const paint = /^(?:fill|stroke|color|stop-color|flood-color|lighting-color)$/i;
   function stylesheet(text) {
-    const { active } = splitComments(text);
+    const { active } = splitComments(text.replace(/\r\n?|\f/g, "\n"));
     references.push(...urls(active, true));
-    for (const match of active.matchAll(/\b(?:fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;}]+)/gi)) colors.push(match[1]);
+    const declarations = /(?:^|[;{])\s*((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*:\s*([^;}]+)/gi;
+    const withoutStrings = active.replace(new RegExp(cssStrings, "g"), '""');
+    for (const match of withoutStrings.matchAll(declarations)) {
+      if (paint.test(decodeCss(match[1]))) colors.push(decodeCss(match[2]));
+    }
   }
-  const markup = text.replace(/<!--[\s\S]*?-->/g, "").replace(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi, (_, css) => {
-    stylesheet(css);
+  const markup = text.replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi, (_, css) => {
+    if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"));
     return "";
   });
-  for (const match of markup.matchAll(/<(?:[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
+  const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]) }];
+  for (const match of markup.matchAll(/<(?:\/?[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
+    const element = match[0].match(/^<\/?([\w:-]+)/)?.[1];
+    if (match[0].startsWith("</")) {
+      const index = scopes.findLastIndex((scope) => scope.element === element);
+      if (index > 0) scopes.length = index;
+      continue;
+    }
+    const namespaces = new Map(scopes.at(-1).namespaces);
+    const attributes = new Map();
     const object = /^<object\b/i.test(match[0]);
     const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(\{\s*(?:"[^"]*"|'[^']*'|`[^`]*`)\s*\}|"[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (attribute, name, raw) => {
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
@@ -198,12 +244,29 @@ function inspectMarkup(text) {
         const point = /^#x/i.test(name) ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
         return String.fromCodePoint(point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? point : 0xfffd);
       }).trim();
-      if (/^(?:href|xlink:href|src|poster)$/i.test(name) || (object && name.toLowerCase() === "data")) references.push(value);
-      if (/^srcset$/i.test(name)) references.push(...srcsetUrls(value));
-      if (paint.test(name)) colors.push(value);
-      if (name.toLowerCase() === "style") stylesheet(value);
+      attributes.set(name, value);
+      if (name.startsWith("xmlns:")) namespaces.set(name.slice(6), value);
       return name.toLowerCase() === "style" ? "" : attribute;
     });
+    for (const [name, value] of attributes) {
+      const [prefix, local] = name.split(":");
+      if (/^(?:href|src|poster)$/i.test(name) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) references.push(value);
+      if (/^srcset$/i.test(name)) references.push(...srcsetUrls(value));
+      if (name === "xml:base" && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) references.push(value);
+      if (name.toLowerCase() === "srcdoc") {
+        const nested = inspectMarkup(value);
+        references.push(...nested.references);
+        if (nested.color) colors.push(nested.color);
+      }
+      if (paint.test(name)) colors.push(value);
+      if (name.toLowerCase() === "style") stylesheet(value);
+    }
+    const htmlAttributes = new Map([...attributes].map(([name, value]) => [name.toLowerCase(), value]));
+    if (element?.toLowerCase() === "meta" && htmlAttributes.get("http-equiv")?.toLowerCase() === "refresh") {
+      const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
+      if (refresh) references.push(refresh[1].trim());
+    }
+    if (!/\/>$/.test(match[0]) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces });
     references.push(...urls(tag, false));
   }
   return { references, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
