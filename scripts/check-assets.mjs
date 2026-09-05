@@ -45,15 +45,24 @@ function urls(text, stylesheet) {
   const identifier = String.raw`((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\(`;
   const strings = String.raw`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'`;
   const imports = String.raw`|@import\s+(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')`;
-  const tokens = new RegExp(identifier + (stylesheet ? imports + strings : ""), "gi");
+  const tokens = new RegExp(identifier + (stylesheet ? imports + strings + "|[()]" : ""), "gi");
   const argument = /\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^)"'])+))\s*\)/y;
+  const functions = [];
   let token;
   while ((token = tokens.exec(text))) {
     if (stylesheet && (token[2] !== undefined || token[3] !== undefined)) {
       values.push(decodeCss(token[2] ?? token[3]));
       continue;
     }
-    if (!token[1] || decodeCss(token[1]).toLowerCase() !== "url") continue;
+    const name = token[1] && decodeCss(token[1]).toLowerCase();
+    if (name !== "url") {
+      if (name || token[0] === "(") functions.push(name);
+      else if (token[0] === ")") functions.pop();
+      else if (/(?:^|-)image-set$/.test(functions.at(-1)) && /^["']/.test(token[0])) {
+        values.push(decodeCss(token[0].slice(1, -1)));
+      }
+      continue;
+    }
     argument.lastIndex = tokens.lastIndex;
     const match = argument.exec(text);
     if (!match) continue;

@@ -203,3 +203,13 @@ test("inactive SVG markup does not report icon colors or URLs", (t) => {
   put(icons, 'export const icons = { box: `<svg><!-- <path stroke="red" style="filter:url(https://example.test/a)"/> --><path stroke="currentColor"/></svg>` };');
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("quoted image-set sources are checked without treating type strings as paths", (t) => {
+  const { root, put, css } = fixture(t);
+  put("src/assets/image.png", "fixture image");
+  for (const [source, rule] of [["https://example.test/a.png", "network-asset"], ["missing.png", "missing-asset"], ["../../assets/image.png", null]]) {
+    put(stylesheet, `${css}\nbody{background:image-set("${source}" type("image/png") 1x)}`);
+    if (rule) single(root, rule);
+    else assert.deepEqual(checkAssets(root), []);
+  }
+});
