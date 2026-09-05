@@ -803,3 +803,9 @@ test("foreign SVG style text joins across HTML comment nodes", (t) => {
   put("src/assets/test.html", '<svg><style>svg{filter:url("https://example.test/a<!--split-->")}</style></svg>');
   single(root, "network-asset");
 });
+
+test("distinct XML attribute casing cannot suppress a network href", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.svg", '<svg><image HREF="#unused" href="https://example.test/a.svg"/></svg>');
+  single(root, "network-asset");
+});

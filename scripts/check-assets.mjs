@@ -425,7 +425,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     const ambiguous = new Set();
     const object = /^<object\b/i.test(source);
     source.replace(/\b([\w:-]+)\s*=\s*(\{(?:"[^"]*"|'[^']*'|`[^`]*`|[^}])*\}|"[^"]*"|'[^']*'|[^\s"'=<>`{]+)/g, (attribute, name, raw) => {
-      if ([...attributes.keys()].some((key) => key.toLowerCase() === name.toLowerCase())) return "";
+      if ([...attributes.keys()].some((key) => html ? key.toLowerCase() === name.toLowerCase() : key === name)) return "";
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
       if (raw.startsWith("{") && !/^(?:"[^"]*"|'[^']*'|`[^`$]*`)$/.test(literal)) return "";
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
