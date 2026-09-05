@@ -34,7 +34,7 @@ Not installed. Listed so the budget is visible before the first install.
 | `shadcn` (CLI, dev) | #4 | Component source, vendored into the repo | MIT |
 | `lucide-react` | #17 | The icon subset, vendored | ISC |
 | `@shadscan/cli` (dev) | #4 | Component rule check in CI | MIT |
-| `@electric-sql/pglite` | #3, #6 | The index and state store | Apache-2.0 |
+| `@electric-sql/pglite` | #6 | The index and state store | Apache-2.0 |
 | `@electric-sql/pglite-pgvector` | #6 | Vector search, off by default | Apache-2.0 |
 | `@tauri-apps/api`, `@tauri-apps/cli` (dev) | #13 | Desktop shell | Apache-2.0 or MIT |
 
@@ -50,3 +50,11 @@ repository. The check script does not compare these with `package.json`.
 GitHub Actions carry a full commit SHA in the workflow that uses them, and
 the dev container image carries its tag in `.devcontainer/devcontainer.json`.
 This ledger does not repeat them.
+
+## Benchmarks
+
+Separate manifests under `benchmarks/`, excluded from the root ledger check.
+
+| Package | Version | Purpose | License | Gate passed |
+|---|---|---|---|---|
+| `@electric-sql/pglite` | 0.5.8 | In-process Postgres, persistent storage and full-text search for issue #33 | Apache-2.0 | 2026-09-05, published 2026-08-26, SLSA provenance, no production dependencies, lifecycle scripts or binding.gyp. Archive hash verified. [Docs](https://pglite.dev/docs/), [registry](https://registry.npmjs.org/@electric-sql/pglite/0.5.8) |
