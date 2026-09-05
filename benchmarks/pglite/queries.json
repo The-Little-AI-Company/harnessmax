@@ -1,0 +1,7 @@
+[
+  "memory", "workspace", "agent", "workflow", "context",
+  "verification", "review", "schema", "document", "index",
+  "\"source of truth\"", "\"working directory\"", "\"pull request\"",
+  "\"read only\"", "\"file system\"", "\"local first\"",
+  "\"unit tests\"", "\"code review\"", "\"memory files\"", "\"one file\""
+]
