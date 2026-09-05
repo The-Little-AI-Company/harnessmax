@@ -23,17 +23,20 @@ const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
 const regexLiteral = String.raw`/(?![/*])(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\[\\\r\n])+/[a-z]*`;
-const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await))\s*$/;
+const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await|else|do))\s*$/;
 
 function controlContext() {
   const parentheses = [];
+  const braces = [];
   let pending = "";
   return {
     closed: false,
     consume(token, prefix) {
       if (!token.trim()) return;
-      this.closed = token === ")" && parentheses.pop() === true;
+      const wasClosed = this.closed;
+      this.closed = (token === ")" && parentheses.pop() === true) || (token === "}" && braces.pop() === true);
       if (token === "(") parentheses.push(Boolean(pending));
+      if (token === "{") braces.push(wasClosed || (braces.at(-1) === true && /\{\s*$/.test(prefix)) || /(?:^|[;})]|=>|\b(?:else|do|try|finally))\s*$/.test(prefix));
       pending = token === "await" && pending === "for" ? pending
         : /^(?:if|while|for|with|switch|catch)$/.test(token) && !/\.\s*$/.test(prefix) ? token : "";
     },
@@ -108,7 +111,7 @@ function templateLiteral(text, start) {
 // Consume quoted strings as units, so comment markers inside strings survive.
 function splitComments(text, javascript = false, jsx = false) {
   const comments = [];
-  const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[()/]` : cssStrings;
+  const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[(){}/]` : cssStrings;
   const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
   let active = "", cursor = 0, depth = 0;
@@ -209,8 +212,15 @@ function srcsetUrls(value) {
 
 function inspectMarkup(text, file, inheritedBase) {
   const references = [];
+  const unresolved = [];
   const colors = [];
-  function reference(value, base) {
+  const fillRules = [];
+  const paintNodes = [];
+  function reference(value, base, ambiguous = false) {
+    if (ambiguous) {
+      unresolved.push(value);
+      return;
+    }
     if (!base || !value || value.startsWith("#") || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(value)) {
       references.push(value);
       return;
@@ -223,17 +233,35 @@ function inspectMarkup(text, file, inheritedBase) {
     }
   }
   const paint = /^(?:fill|stroke|color|stop-color|flood-color|lighting-color)$/i;
-  function stylesheet(text, base) {
+  function stylesheet(text, base, embedded = false) {
     const { active } = splitComments(text.replace(/\r\n?|\f/g, "\n"));
+    if (embedded) {
+      for (const rule of active.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const fill = stylesheet(rule[2], base).get("fill");
+        if (!fill) continue;
+        for (const selector of rule[1].split(",").map((value) => value.trim())) {
+          if (/^(?:\*|[a-z][\w-]*|[.#][\w-]+)$/i.test(selector)) fillRules.push({ selector, fill });
+        }
+      }
+    }
     for (const value of urls(active, true)) reference(value, base);
     const declarations = /(?:^|[;{])\s*((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*:\s*([^;}]+)/gi;
     const withoutStrings = active.replace(new RegExp(cssStrings, "g"), '""');
+    const paints = new Map();
     for (const match of withoutStrings.matchAll(declarations)) {
-      if (paint.test(decodeCss(match[1]))) colors.push(decodeCss(match[2]));
+      const name = decodeCss(match[1]).toLowerCase();
+      if (paint.test(name)) {
+        const value = decodeCss(match[2]);
+        colors.push(value);
+        paints.set(name, value.trim().replace(/\s*!important$/i, ""));
+      }
     }
+    return paints;
   }
-  const markup = text.replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi,
-    (whole, css) => css === undefined ? "" : whole);
+  const markup = text.replace(/<!--[\s\S]*?(?:--!?>|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi,
+    (whole, css) => css === undefined ? "" : whole)
+    .replace(/<(textarea|title|xmp|iframe|noembed|noframes|script)\b((?:"[^"]*"|'[^']*'|[^'">])*)>[\s\S]*?(?:<\/\1\s*>|$)/gi, "<$1$2></$1>")
+    .replace(/<plaintext\b[^>]*>[\s\S]*$/gi, "");
   const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]), base: inheritedBase }];
   for (const match of markup.matchAll(/<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)(?:<\/style\s*>|$)|<(?:\/?[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
     const source = match[1] === undefined ? match[0] : match[0].match(/^<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>/i)[0];
@@ -245,15 +273,21 @@ function inspectMarkup(text, file, inheritedBase) {
     }
     const namespaces = new Map(scopes.at(-1).namespaces);
     const attributes = new Map();
+    const ambiguous = new Set();
     const object = /^<object\b/i.test(source);
     const tag = source.replace(/\b([\w:-]+)\s*=\s*(\{(?:"[^"]*"|'[^']*'|`[^`]*`|[^}])*\}|"[^"]*"|'[^']*'|[^\s"'=<>`{]+)/g, (attribute, name, raw) => {
+      if ([...attributes.keys()].some((key) => key.toLowerCase() === name.toLowerCase())) return "";
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
       if (raw.startsWith("{") && !/^(?:"[^"]*"|'[^']*'|`[^`$]*`)$/.test(literal)) return "";
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
       // JSX expression strings contain JavaScript text, not XML entities.
-      if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, name) => {
-        if (!name.startsWith("#")) return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[name] ?? entity;
-        const point = /^#x/i.test(name) ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+      if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi, (entity, entityName) => {
+        if (!entityName.startsWith("#")) {
+          const decoded = ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[entityName];
+          if (decoded === undefined) ambiguous.add(name);
+          return decoded ?? entity;
+        }
+        const point = /^#x/i.test(entityName) ? Number.parseInt(entityName.slice(2), 16) : Number(entityName.slice(1));
         return String.fromCodePoint(point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? point : 0xfffd);
       }).trim();
       attributes.set(name, value);
@@ -264,29 +298,44 @@ function inspectMarkup(text, file, inheritedBase) {
     if (attributes.has("xml:base")) {
       try { base = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
-    if (match[1] !== undefined) stylesheet(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base);
+    if (match[1] !== undefined) stylesheet(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
+    let inlineFill;
     for (const [name, value] of attributes) {
       const [prefix, local] = name.split(":");
-      if (/^(?:href|src|poster)$/i.test(name) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base);
-      if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base);
+      if (/^(?:href|src|poster)$/i.test(name) || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base, ambiguous.has(name));
+      if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));
       if (name === "xml:base" && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) references.push(value);
       if (name.toLowerCase() === "srcdoc") {
         const nested = inspectMarkup(value, file, base);
         references.push(...nested.references);
+        unresolved.push(...nested.unresolved);
         if (nested.color) colors.push(nested.color);
       }
       if (paint.test(name)) colors.push(value);
-      if (name.toLowerCase() === "style") stylesheet(value, base);
+      if (name.toLowerCase() === "style") inlineFill = stylesheet(value, base).get("fill");
     }
+    const paintNode = { element, attributes, inlineFill, parent: scopes.at(-1).paintNode };
+    paintNodes.push(paintNode);
     const htmlAttributes = new Map([...attributes].map(([name, value]) => [name.toLowerCase(), value]));
     if (element?.toLowerCase() === "meta" && htmlAttributes.get("http-equiv")?.toLowerCase() === "refresh") {
       const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
       if (refresh) reference(refresh[1].trim(), base);
     }
-    if (match[1] === undefined && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base });
+    if (match[1] === undefined && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base, paintNode });
     for (const value of urls(tag, false)) reference(value, base);
   }
-  return { references, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
+  for (const node of paintNodes) {
+    let styled, specificity = -1;
+    for (const { selector, fill } of fillRules) {
+      const score = selector.startsWith("#") ? 100 : selector.startsWith(".") ? 10 : selector === "*" ? 0 : 1;
+      const matches = selector === "*" || selector === node.element || (selector.startsWith("#") && node.attributes.get("id") === selector.slice(1)) || (selector.startsWith(".") && node.attributes.get("class")?.split(/\s+/).includes(selector.slice(1)));
+      if (matches && score >= specificity) { styled = fill; specificity = score; }
+    }
+    node.fill = node.inlineFill ?? styled ?? node.attributes.get("fill") ?? node.parent?.fill ?? "black";
+    if (node.fill === "inherit") node.fill = node.parent?.fill ?? "black";
+    if (/^(?:path|rect|circle|ellipse|polygon|polyline|text|tspan|textPath)$/.test(node.element ?? "") && node.fill === "black") colors.push("black (default fill)");
+  }
+  return { references, unresolved, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
 }
 
 export function checkAssets(root) {
@@ -381,6 +430,9 @@ export function checkAssets(root) {
     // Serialized icon markup is inspected as text, never imported or executed.
     const content = javascript ? active.replace(/\\(["'])/g, "$1") : active;
     const inspected = isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file);
+    for (const value of new Set(inspected.unresolved ?? [])) {
+      add(localPath(file), "network-asset", `Cannot establish an offline target with unresolved character references: ${value}`, "Use literal URL characters or numeric character references.");
+    }
     for (const url of new Set(inspected.references)) {
       if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) {
         add(localPath(file), "network-asset", `URL uses a scheme or network address: ${url}`, "Vendor the asset and use a relative local URL.");

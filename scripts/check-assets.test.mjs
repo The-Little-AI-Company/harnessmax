@@ -204,7 +204,7 @@ test("SVG link attributes cannot load from a network", (t) => {
 
 test("inactive SVG markup does not report icon colors or URLs", (t) => {
   const { root, put } = fixture(t);
-  put(icons, 'export const icons = { box: `<svg><!-- <path stroke="red" style="filter:url(https://example.test/a)"/> --><path stroke="currentColor"/></svg>` };');
+  put(icons, 'export const icons = { box: `<svg fill="none"><!-- <path stroke="red" style="filter:url(https://example.test/a)"/> --><path stroke="currentColor"/></svg>` };');
   assert.deepEqual(checkAssets(root), []);
 });
 
@@ -290,7 +290,7 @@ test("JSX text preserves comment markers while expression comments stay inactive
 
 test("JavaScript assignments outside markup are not paint or asset attributes", (t) => {
   const { root, put } = fixture(t);
-  put(icons, 'const color = "red"; const src = "https://example.test/a"; const example = "url(https://example.test/not-rendered)"; export const icons = { box: `<path stroke="currentColor"/>` };');
+  put(icons, 'const color = "red"; const src = "https://example.test/a"; const example = "url(https://example.test/not-rendered)"; export const icons = { box: `<path fill="none" stroke="currentColor"/>` };');
   assert.deepEqual(checkAssets(root), []);
 });
 
@@ -371,7 +371,7 @@ test("markup character references decode before resolving asset paths", (t) => {
   put("src/assets/identity/mark.svg", '<svg><image href="&#104;ttps://example.test/a"/></svg>');
   single(root, "network-asset");
   put("src/assets/identity/mark.svg", "<svg/>");
-  put(icons, 'export const icon = `<path stroke="current&#x43;olor"/>`;');
+  put(icons, 'export const icon = `<path fill="none" stroke="current&#x43;olor"/>`;');
   assert.deepEqual(checkAssets(root), []);
 });
 
@@ -456,4 +456,62 @@ test("relative XML bases apply to descendants and restore at closing tags", (t) 
   put("src/assets/logo%mark.svg", "<svg/>");
   put("src/assets/identity/mark.svg", '<svg xml:base="../"><image href="logo%23mark.svg"/><image href="logo%25mark.svg"/><image href="fonts/OFL.txt"/><g xml:base="fonts/"><image href="OFL.txt"/><style>svg{filter:url(OFL.txt)}</style></g><image href="fonts/OFL.txt"/></svg>');
   assert.deepEqual(checkAssets(root), []);
+});
+
+test("unresolved named entities cannot disguise offline asset targets", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<img src="https&colon;&sol;&sol;example.test/a">');
+  single(root, "network-asset");
+});
+
+test("duplicate attributes retain their first value", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", "<svg/>");
+  put("src/assets/test.html", '<img src="https://example.test/a" src="local.svg">');
+  single(root, "network-asset");
+  rmSync(join(root, "src/assets/test.html"));
+  put(icons, 'export const icon = `<path stroke="red" stroke="currentColor"/>`;');
+  single(root, "icon-color");
+});
+
+test("regex literals after statement boundaries preserve later markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const statement of ['if (flag) foo(); else /[/*]/.test("x");', 'do /[/*]/.test("x"); while (flag);', 'if (flag) {} /[/*]/.test("x");', 'if (flag) { {} /[/*]/.test("x"); }']) {
+    put(icons, `${statement} export const icon = \`<image href="https://example.test/a"/>\`;`);
+    single(root, "network-asset");
+  }
+});
+
+test("HTML alternate comment endings preserve active following markup", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<!-- old --!><img src="https://example.test/a">');
+  single(root, "network-asset");
+});
+
+test("React xlinkHref properties are asset references", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/extra.tsx", 'export const icon = <image xlinkHref="https://example.test/a.svg" />;');
+  single(root, "network-asset");
+});
+
+test("HTML raw text and RCDATA are not nested asset markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const element of ["textarea", "title", "xmp", "iframe", "noembed", "noframes", "script"]) {
+    put("src/assets/test.html", `<${element}><img src="https://example.test/a"></${element}>`);
+    assert.deepEqual(checkAssets(root), []);
+  }
+});
+
+test("icon geometry cannot inherit the default black fill", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, 'export const icon = `<svg><path d="M0 0h1"/></svg>`;');
+  single(root, "icon-color");
+  for (const fill of ["none", "currentColor"]) {
+    put(icons, `export const icon = \`<svg fill="${fill}"><path d="M0 0h1"/></svg>\`;`);
+    assert.deepEqual(checkAssets(root), []);
+  }
+  for (const selector of ["path", "*", ".shape", "#shape"]) {
+    put(icons, `export const icon = \`<svg><path id="shape" class="shape" stroke="currentColor"/><style>${selector}{fill:none}</style></svg>\`;`);
+    assert.deepEqual(checkAssets(root), []);
+  }
 });
