@@ -22,6 +22,8 @@ const rules = ["network-asset", "missing-asset", "unproven-font", "icon-color"];
 const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
+const regexLiteral = String.raw`/(?![/*])(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\[\\\r\n])+/[a-z]*`;
+const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await))\s*$/;
 
 function decodeCss(text) {
   return text.replace(/\\(?:([\da-f]{1,6})\s?|([\s\S]))/gi, (_, hex, char) => {
@@ -30,10 +32,61 @@ function decodeCss(text) {
   });
 }
 
+// A template's literal text is markup, but its interpolations are JavaScript.
+// Keep strings and nested templates intact while removing expression comments.
+function templateLiteral(text, start) {
+  let result = "`", index = start + 1, braces = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "\\") {
+      result += text.slice(index, index + 2);
+      index += 2;
+    } else if (!braces && char === "`") {
+      return { text: result + char, end: index + 1 };
+    } else if (!braces && text.startsWith("${", index)) {
+      result += "${";
+      index += 2;
+      braces = 1;
+    } else if (braces && text.startsWith("/*", index)) {
+      const end = text.indexOf("*/", index + 2);
+      index = end < 0 ? text.length : end + 2;
+      result += " ";
+    } else if (braces && text.startsWith("//", index)) {
+      const end = text.slice(index).search(/[\r\n]/);
+      index = end < 0 ? text.length : index + end;
+      result += " ";
+    } else if (braces && char === "/" && regexContext.test(result)) {
+      const literal = text.slice(index).match(new RegExp("^" + regexLiteral, "i"))?.[0] ?? char;
+      result += literal;
+      index += literal.length;
+    } else if (braces && char === "`") {
+      const nested = templateLiteral(text, index);
+      result += nested.text;
+      index = nested.end;
+    } else if (braces && (char === '"' || char === "'")) {
+      const quote = char;
+      result += text[index++];
+      while (index < text.length) {
+        const next = text[index++];
+        result += next;
+        if (next === "\\" && index < text.length) result += text[index++];
+        else if (next === quote) break;
+      }
+    } else {
+      if (braces && char === "{") braces++;
+      if (braces && char === "}") braces--;
+      result += char;
+      index++;
+    }
+  }
+  return { text: result, end: index };
+}
+
 // Consume quoted strings as units, so comment markers inside strings survive.
 function splitComments(text, javascript = false, jsx = false) {
   const comments = [];
-  const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60(?:\\[\s\S]|[^\x60\\])*\x60|//[^\r\n]*` : cssStrings;
+  const regex = String.raw`(?:^|(?<=[({[=,:;!?&|+*%^~<>-])|\b(?:return|throw|case|delete|void|typeof|yield|await)\s+)\s*` + regexLiteral;
+  const strings = javascript ? regex + String.raw`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*` : cssStrings;
   const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
   let active = "", cursor = 0, depth = 0;
@@ -57,6 +110,10 @@ function splitComments(text, javascript = false, jsx = false) {
       // so tags between those markers still update the JSX nesting depth.
       token = token.slice(0, 1);
       tokens.lastIndex = match.index + 1;
+    } else if (javascript && token === "`") {
+      const literal = templateLiteral(text, match.index);
+      token = literal.text;
+      tokens.lastIndex = literal.end;
     } else if (javascript && token.startsWith("//")) {
       token = " ";
     } else if (token.startsWith("/*")) {
@@ -101,6 +158,20 @@ function urls(text, stylesheet) {
   return values;
 }
 
+function srcsetUrls(value) {
+  const sources = [];
+  let remaining = value;
+  while (remaining) {
+    remaining = remaining.replace(/^[\s,]+/, "");
+    const source = remaining.match(/^\S+/)?.[0];
+    if (!source) break;
+    sources.push(source.replace(/,+$/, ""));
+    remaining = remaining.slice(source.length);
+    if (!source.endsWith(",")) remaining = remaining.replace(/^[^,]*(?:,|$)/, "");
+  }
+  return sources;
+}
+
 function inspectMarkup(text) {
   const references = [];
   const colors = [];
@@ -114,13 +185,16 @@ function inspectMarkup(text) {
     stylesheet(css);
     return "";
   });
-  for (const match of markup.matchAll(/<[a-z][\w:-]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
-    const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g, (attribute, name, double, single, bare) => {
-    const value = (double ?? single ?? bare).trim();
-    if (/^(?:href|xlink:href|src)$/i.test(name)) references.push(value);
-    if (paint.test(name)) colors.push(value);
-    if (name.toLowerCase() === "style") stylesheet(value);
-    return name.toLowerCase() === "style" ? "" : attribute;
+  for (const match of markup.matchAll(/<(?:[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
+    const object = /^<object\b/i.test(match[0]);
+    const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(\{\s*(?:"[^"]*"|'[^']*'|`[^`]*`)\s*\}|"[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (attribute, name, raw) => {
+      const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
+      const value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
+      if (/^(?:href|xlink:href|src|poster)$/i.test(name) || (object && name.toLowerCase() === "data")) references.push(value);
+      if (/^srcset$/i.test(name)) references.push(...srcsetUrls(value));
+      if (paint.test(name)) colors.push(value);
+      if (name.toLowerCase() === "style") stylesheet(value);
+      return name.toLowerCase() === "style" ? "" : attribute;
     });
     references.push(...urls(tag, false));
   }

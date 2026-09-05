@@ -293,3 +293,65 @@ test("JavaScript assignments outside markup are not paint or asset attributes", 
   put(icons, 'const color = "red"; const src = "https://example.test/a"; const example = "url(https://example.test/not-rendered)"; export const icons = { box: `<path stroke="currentColor"/>` };');
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("JSX static expression attributes resolve local and remote targets", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", "<svg/>");
+  for (const quote of ['"', "'", "`"]) {
+    put("src/app/icons/extra.tsx", `export const icon = <image href={${quote}../../assets/local.svg${quote}}/>;`);
+    assert.deepEqual(checkAssets(root), []);
+    put("src/app/icons/extra.tsx", `export const icon = <image href={${quote}https://example.test/a.svg${quote}}/>;`);
+    single(root, "network-asset");
+  }
+});
+
+test("srcset candidates are checked individually", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.png", "fixture image");
+  put("src/assets/test.html", '<img srcset="local.png 1x, missing.png 2x">');
+  single(root, "missing-asset");
+  put("src/assets/test.html", '<img srcset="https://example.test/a.png 1x, https://example.test/b.png 2x">');
+  const findings = checkAssets(root);
+  assert.equal(findings.length, 2);
+  assert.ok(findings.every(({ rule }) => rule === "network-asset"));
+  rmSync(join(root, "src/assets/test.html"));
+  put("src/app/icons/extra.tsx", 'export const icon = <img srcSet={"../../assets/local.png 1x"}/>;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("comments inside template expressions stay inactive, including nested templates", (t) => {
+  const { root, put } = fixture(t);
+  for (const source of [
+    'export const icon = `<svg>${/* <image href="https://example.test/a"/> */ ""}</svg>`;',
+    'export const icon = `<svg>${`<g>${/* <image href="https://example.test/a"/> */ ""}</g>`}</svg>`;',
+    'export const icon = `<svg>${// <image href="https://example.test/a"/>\n ""}</svg>`;',
+  ]) {
+    put(icons, source);
+    assert.deepEqual(checkAssets(root), []);
+  }
+});
+
+test("XML stylesheet processing instructions are checked", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<?xml-stylesheet href="https://example.test/a.css"?><svg/>');
+  single(root, "network-asset");
+});
+
+test("poster and object data attributes are asset references", (t) => {
+  const { root, put } = fixture(t);
+  for (const markup of ['<video poster="https://example.test/a.png"></video>', '<object data="https://example.test/a.svg"></object>']) {
+    put("src/assets/test.html", markup);
+    single(root, "network-asset");
+  }
+});
+
+test("regex literal comment markers do not erase active markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const source of [
+    'export const icon = `<svg>${/[/*]/.test("x") ? "" : ""}<image href="https://example.test/a"/></svg>`;',
+    'const regex = /[/*]/; export const icon = `<image href="https://example.test/a"/>`;',
+  ]) {
+    put(icons, source);
+    single(root, "network-asset");
+  }
+});
