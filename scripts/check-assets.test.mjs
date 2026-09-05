@@ -677,5 +677,69 @@ test("CSS string continuations resolve the joined local filename", (t) => {
   for (const newline of ["\n", "\r\n", "\r", "\f"]) {
     put("src/styles/test.css", `body{background:url("../assets/lo\\${newline}go.svg")}`);
     assert.deepEqual(checkAssets(root), []);
+    put("src/styles/test.css", `body{background:url("htt\\${newline}ps://example.test/a.png")}`);
+    single(root, "network-asset");
+  }
+});
+
+test("template bases do not select the active HTML document base", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local/image.png", "fixture image");
+  put("src/assets/test.html", '<template><base href="local/"></template><base href="https://example.test/"><img src="image.png">');
+  assert.ok(checkAssets(root).some((finding) => finding.rule === "network-asset"));
+});
+
+test("URL parser whitespace cannot disguise a network scheme", (t) => {
+  const { root, put } = fixture(t);
+  for (const value of ["htt\nps://example.test/a.png", "htt\tps://example.test/a.png", "\u0001https://example.test/a.png\u0002"]) {
+    put(`src/assets/${value}`, "fixture image");
+    put("src/assets/test.html", `<img src="${value}">`);
+    single(root, "network-asset");
+  }
+});
+
+test("self-closing foreign SVG elements preserve following HTML asset references", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<svg><title/><image href="https://example.test/a.svg"/></svg>');
+  single(root, "network-asset");
+});
+
+test("responsive preload image candidates are inspected", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.png", "fixture image");
+  put("src/assets/test.html", '<link rel="preload" as="image" href="local.png" imagesrcset="https://example.test/a.png 1x">');
+  single(root, "network-asset");
+});
+
+test("SVG animations cannot assign unchecked image URLs", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", '<svg/>');
+  for (const attribute of ['to="https://example.test/a.svg"', 'from="https://example.test/a.svg"', 'values="local.svg;https://example.test/a.svg"']) {
+    put("src/assets/test.svg", `<svg><image href="local.svg"><set attributeName="href" ${attribute}/></image></svg>`);
+    single(root, "network-asset");
+  }
+});
+
+test("legacy HTML background image attributes are inspected", (t) => {
+  const { root, put } = fixture(t);
+  for (const tag of ["body", "table", "tr", "th", "td"]) {
+    put("src/assets/test.html", `<${tag} background="https://example.test/a.png">`);
+    single(root, "network-asset");
+  }
+});
+
+test("TypeScript module extensions use JavaScript source contexts", (t) => {
+  const { root, put } = fixture(t);
+  for (const extension of ["mts", "cts"]) {
+    put(`src/app/icons/test.${extension}`, '/* <image href="https://example.test/inert"/> */ export const icon = `<image href="https://example.test/a.svg"/>`;');
+  }
+  assert.equal(checkAssets(root).filter((finding) => finding.rule === "network-asset").length, 2);
+});
+
+test("HTML breakout tags restore HTML raw-text rules inside SVG", (t) => {
+  const { root, put } = fixture(t);
+  for (const breakout of ["<div>", '<font color="red">', "</p>"]) {
+    put("src/assets/test.html", `<svg>${breakout}<title/><img src="https://example.test/a">`);
+    assert.deepEqual(checkAssets(root), []);
   }
 });
