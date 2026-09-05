@@ -186,8 +186,12 @@ test("font provenance must be in the font stylesheet", (t) => {
 
 test("quoted CSS imports cannot load from a network", (t) => {
   const { root, put, css } = fixture(t);
-  put(stylesheet, `${css}\n@import "https://example.test/fonts.css";`);
-  single(root, "network-asset");
+  for (const keyword of ["@import ", "@import", String.raw`@im\70ort`]) {
+    put(stylesheet, `${css}\n${keyword}"https://example.test/fonts.css";`);
+    single(root, "network-asset");
+    put(stylesheet, `${css}\n${keyword}'missing.css';`);
+    single(root, "missing-asset");
+  }
 });
 
 test("SVG link attributes cannot load from a network", (t) => {

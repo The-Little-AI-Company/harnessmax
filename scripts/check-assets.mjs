@@ -44,14 +44,14 @@ function urls(text, stylesheet) {
   const values = [];
   const identifier = String.raw`((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\(`;
   const strings = String.raw`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'`;
-  const imports = String.raw`|@import\s+(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')`;
+  const imports = String.raw`|@((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')`;
   const tokens = new RegExp(identifier + (stylesheet ? imports + strings + "|[()]" : ""), "gi");
   const argument = /\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^)"'])+))\s*\)/y;
   const functions = [];
   let token;
   while ((token = tokens.exec(text))) {
-    if (stylesheet && (token[2] !== undefined || token[3] !== undefined)) {
-      values.push(decodeCss(token[2] ?? token[3]));
+    if (stylesheet && token[2]) {
+      if (decodeCss(token[2]).toLowerCase() === "import") values.push(decodeCss(token[3] ?? token[4]));
       continue;
     }
     const name = token[1] && decodeCss(token[1]).toLowerCase();
@@ -190,7 +190,7 @@ export function checkAssets(root) {
     }
     if (localPath(file) === "src/app/icons/icons.ts") {
       const color = iconColor(urlText);
-      if (color) add(localPath(file), "icon-color", `Icon uses fixed paint: ${color}`, "Use currentColor for icon paint; none is allowed for unpainted shapes.");
+      if (color) add(localPath(file), "icon-color", `Icon uses fixed paint: ${color}`, "Use currentColor for icon paint. Use none for unpainted shapes.");
     }
   }
   for (const [file, bytes] of fonts) {
