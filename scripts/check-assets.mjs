@@ -20,7 +20,7 @@ const requiredAssets = [
 ];
 const rules = ["network-asset", "missing-asset", "unproven-font", "icon-color"];
 const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
-const sourceExtension = /\.(?:css|svg|[cm]?[jt]s|[jt]sx|html|xml)$/i;
+const sourceExtension = /\.(?:css|svg|[cm]?[jt]s|[jt]sx|html|xml|webmanifest)$/i;
 const normalizeUrl = (value) => value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\r\n]/g, "").replace(/\\/g, "/");
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
@@ -49,6 +49,20 @@ function decodeCss(text) {
   return text.replace(/\\(?:([\da-f]{1,6})\s?|(\r\n|[\s\S]))/gi, (_, hex, char) => {
     const point = hex && Number.parseInt(hex, 16);
     return hex ? String.fromCodePoint(point > 0 && point <= 0x10ffff ? point : 0xfffd) : /^[\r\n\f]+$/.test(char) ? "" : char;
+  });
+}
+
+function decodeEntities(value, html, unknown) {
+  const entities = html ? /&(#x[\da-f]+|#\d+);?|&([a-z][\da-z]*);/gi : /&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi;
+  return value.replace(entities, (entity, numeric, named) => {
+    const name = numeric ?? named;
+    if (!name.startsWith("#")) {
+      const decoded = ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[name];
+      if (decoded === undefined) unknown(entity);
+      return decoded ?? entity;
+    }
+    const point = /^#x/i.test(name) ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return String.fromCodePoint(point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? point : 0xfffd);
   });
 }
 
@@ -151,7 +165,11 @@ function readTag(text, start, jsx) {
     } else if (jsx && char === "{") {
       const region = templateLiteral(text, index, true);
       const value = region.text.slice(1, -1).trim();
+      const string = String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'`;
+      const concatenation = value.match(new RegExp(`^(${string})(?:\\s*\\+\\s*(?:${string}|[a-z_$][\\w$]*(?:\\.[a-z_$][\\w$]*)*))+\\s*$`, "i"));
+      const prefix = concatenation && normalizeUrl(decodeJavascript(concatenation[1].slice(1, -1)));
       source += /\bstyle\s*=\s*$/i.test(source) && value.startsWith("{") ? `"${styleObject(value)}"`
+        : prefix && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(prefix) ? `"${prefix.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`
         : /^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`[^`$]*`)$/.test(value) ? region.text : "{}";
       index = region.end;
     } else {
@@ -171,10 +189,12 @@ function* markupElements(text, html, jsx) {
     const styles = scopes.filter((scope) => scope.css !== undefined);
     for (const style of styles) style.css += text.slice(cursor, start < 0 ? text.length : start);
     if (start < 0) {
-      for (const style of styles) yield { source: "", css: style.css, complete: true };
+      for (const style of styles) yield { source: "", css: style.css, characterData: true, complete: true };
       return;
     }
     if (text.startsWith("<!--", start)) {
+      const abrupt = html && text.slice(start + 4).match(/^-?>/);
+      if (abrupt) { cursor = start + 4 + abrupt[0].length; continue; }
       const end = /--!?>/g;
       end.lastIndex = start + 4;
       cursor = end.exec(text) ? end.lastIndex : text.length;
@@ -183,7 +203,7 @@ function* markupElements(text, html, jsx) {
     if (text.startsWith("<![CDATA[", start)) {
       const foreign = !html || scopes.at(-1).children !== "html";
       const end = text.indexOf(foreign ? "]]>" : ">", start + 9);
-      if (foreign) for (const style of styles) style.css += text.slice(start + 9, end < 0 ? text.length : end);
+      if (foreign) for (const style of styles) style.css += text.slice(start, end < 0 ? text.length : end + 3);
       cursor = end < 0 ? text.length : end + (foreign ? 3 : 1);
       continue;
     }
@@ -202,7 +222,7 @@ function* markupElements(text, html, jsx) {
       const index = scopes.findLastIndex((scope) => scope.element === closingElement);
       if (index > 0) scopes.length = index;
     }
-    for (const style of styles) if (!scopes.includes(style)) yield { source: "", css: style.css, complete: true };
+    for (const style of styles) if (!scopes.includes(style)) yield { source: "", css: style.css, characterData: true, complete: true };
     const namespace = html && /^(?:svg|math)$/.test(element ?? "") ? element : scopes.at(-1).children;
     const selfClosing = /\/>$/.test(tag.source) && namespace !== "html";
     if (!selfClosing && ((element === "style" && (!html || namespace === "html")) || (namespace === "html" && /^(?:textarea|title|xmp|iframe|noembed|noframes|script|plaintext)$/.test(element ?? "")))) {
@@ -211,7 +231,7 @@ function* markupElements(text, html, jsx) {
       const end = element === "plaintext" ? null : closing.exec(text);
       const content = text.slice(cursor, end?.index ?? text.length);
       cursor = end ? (html ? readTag(text, end.index, false).end : closing.lastIndex) : text.length;
-      yield { source: tag.source, css: element === "style" ? content : undefined, complete: true };
+      yield { source: tag.source, css: element === "style" ? content : undefined, characterData: !html, complete: true };
     } else {
       if (element && !selfClosing && !(namespace === "html" && /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(element))) {
         const children = namespace === "svg" && /^(?:foreignobject|desc|title)$/.test(element) ? "html" : namespace;
@@ -220,7 +240,7 @@ function* markupElements(text, html, jsx) {
       yield { source: tag.source, complete: selfClosing };
     }
   }
-  for (const scope of scopes) if (scope.css !== undefined) yield { source: "", css: scope.css, complete: true };
+  for (const scope of scopes) if (scope.css !== undefined) yield { source: "", css: scope.css, characterData: true, complete: true };
 }
 
 function decodeJavascript(text) {
@@ -238,6 +258,8 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
   const comments = [];
   const documents = [];
   let documentTail = 0;
+  const groups = [];
+  let groupBoundary = 0, documentBoundary = 0;
   const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[(){}/]` : cssStrings;
   const tags = jsx ? String.raw`</?[a-z][\w:.-]*|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
@@ -284,13 +306,18 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
       comments.push(token.slice(2).replace(/\*\/$/, ""));
       token = " ";
     }
-    if (javascript && !markupText) context.consume(token, active);
+    if (javascript && !markupText) {
+      if (token === "(") groups.push(regexContext.test(active) || !active.trim());
+      if (token === ")" && groups.pop() === false) groupBoundary++;
+      context.consume(token, active);
+    }
     if (extractDocuments && !markupText && /^["'`]/.test(token)) {
       const value = token.startsWith("`") && /\bString\.raw\s*$/.test(active) ? token.slice(1, -1) : decodeJavascript(token.slice(1, -1));
-      if (documents.length && /^\s*\+\s*$/.test(active.slice(documentTail))) documents[documents.length - 1] += value;
+      if (documents.length && documentBoundary === groupBoundary && /^[\s)]*\+[\s(]*$/.test(active.slice(documentTail))) documents[documents.length - 1] += value;
       else documents.push(value);
       token = '""';
       documentTail = active.length + token.length;
+      documentBoundary = groupBoundary;
     }
     active += token;
     cursor = tokens.lastIndex;
@@ -351,6 +378,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
   const colors = [];
   const fillRules = [];
   const paintNodes = [];
+  let importedStyles = false;
   let documentBase = inheritedBase, baseSeen = false;
   function reference(value, base, ambiguous = false) {
     if (value.includes("\0")) {
@@ -377,8 +405,11 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     }
   }
   const paint = /^(?:fill|stroke|color|stop-color|flood-color|lighting-color)$/i;
-  function stylesheet(text, base, embedded = false) {
+  function stylesheet(text, base, embedded = false, unknownEntities = new Set()) {
     const { active } = splitComments(text.replace(/\r\n?|\f/g, "\n"));
+    for (const token of active.matchAll(new RegExp(cssStrings + String.raw`|@((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)`, "gi"))) {
+      if (token[1] && decodeCss(token[1]).toLowerCase() === "import") importedStyles = true;
+    }
     if (embedded) {
       let depth = 0, start = 0, body = 0, selectors = "";
       for (const token of active.matchAll(new RegExp(cssStrings + "|[{}]", "g"))) {
@@ -388,7 +419,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
           const declarations = active.slice(body, token.index);
           start = token.index + 1;
           if (selectors.startsWith("@") || /[{}]/.test(declarations.replace(new RegExp(cssStrings, "g"), ""))) continue;
-          const fill = stylesheet(declarations, base).get("fill");
+          const fill = stylesheet(declarations, base, false, unknownEntities).get("fill");
           if (!fill) continue;
           for (const selector of selectors.split(",").map((value) => value.trim())) {
             if (/^(?:\*|[a-z][\w-]*|[.#][\w-]+)$/i.test(selector)) fillRules.push({ selector, fill });
@@ -396,7 +427,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
         }
       }
     }
-    for (const value of urls(active, true)) reference(value, base);
+    for (const value of urls(active, true)) reference(value, base, [...unknownEntities].some((entity) => value.includes(entity)));
     const declarations = /(?:^|[;{])\s*((?:[-\w]|\\(?:[\da-f]{1,6}\s?|[^\r\n]))+)\s*:\s*([^;}]+)/gi;
     const withoutStrings = active.replace(new RegExp(cssStrings, "g"), '""');
     const paints = new Map();
@@ -412,7 +443,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     return paints;
   }
   const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]) }];
-  for (const { source, css, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
+  for (const { source, css, characterData, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
     const sourceElement = source.match(/^<\/?([\w:-]+)/)?.[1];
     const element = html ? sourceElement?.toLowerCase() : sourceElement;
     if (source.startsWith("</")) {
@@ -431,17 +462,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
       if (raw.startsWith("{")) value = decodeJavascript(value);
       // JSX expression strings contain JavaScript text, not XML entities.
-      const entities = html ? /&(#x[\da-f]+|#\d+);?|&([a-z][\da-z]*);/gi : /&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi;
-      if (!raw.startsWith("{")) value = value.replace(entities, (entity, numeric, named) => {
-        const entityName = numeric ?? named;
-        if (!entityName.startsWith("#")) {
-          const decoded = ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[entityName];
-          if (decoded === undefined) ambiguous.add(name);
-          return decoded ?? entity;
-        }
-        const point = /^#x/i.test(entityName) ? Number.parseInt(entityName.slice(2), 16) : Number(entityName.slice(1));
-        return String.fromCodePoint(point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? point : 0xfffd);
-      }).trim();
+      if (!raw.startsWith("{")) value = decodeEntities(value, html, () => ambiguous.add(name)).trim();
       attributes.set(name, value);
       if (name.startsWith("xmlns:")) namespaces.set(name.slice(6), value);
       return name.toLowerCase() === "style" ? "" : attribute;
@@ -462,7 +483,11 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     if (attributes.has("xml:base") && !attributes.get("xml:base").includes("\0")) {
       try { base = scopedBase = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
-    if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
+    if (css !== undefined) {
+      const unknownEntities = new Set();
+      const decoded = characterData ? css.split(/(<!\[CDATA\[[\s\S]*?(?:\]\]>|$))/).map((part) => part.startsWith("<![CDATA[") ? part.slice(9).replace(/\]\]>$/, "") : decodeEntities(part, html, (entity) => unknownEntities.add(entity))).join("") : css;
+      stylesheet(decoded, base, true, unknownEntities);
+    }
     let inlineFill;
     for (const [name, value] of attributes) {
       if (value.includes("\0")) {
@@ -470,7 +495,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
         continue;
       }
       if (html && element?.toLowerCase() === "base" && name.toLowerCase() === "href") continue;
-      const [prefix, local] = name.split(":");
+      const [prefix, local] = (html ? name.toLowerCase() : name).split(":");
       if (/^(?:href|src|poster)$/i.test(name) || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base, ambiguous.has(name));
       if (/^(?:srcset|imagesrcset)$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));
       if (html && name.toLowerCase() === "background" && /^(?:body|table|tr|th|td)$/i.test(element ?? "")) reference(value, base, ambiguous.has(name));
@@ -520,7 +545,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     if (node.fill === "inherit") node.fill = node.parent?.fill ?? "black";
     if (/^(?:path|rect|circle|ellipse|polygon|polyline|text|tspan|textPath)$/.test(node.element ?? "") && node.fill === "black") colors.push("black (default fill)");
   }
-  return { references, unresolved, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
+  return { references, unresolved, importedStyles, color: colors.find((value) => !/^(?:currentColor|none|inherit)\s*(?:!important)?$/i.test(value.trim())) };
 }
 
 export function checkAssets(root) {
@@ -623,11 +648,23 @@ export function checkAssets(root) {
     }
     // Serialized icon markup is inspected as text, never imported or executed.
     const contents = [active, ...documents.filter((document) => document.includes("<"))];
-    const inspections = contents.map((content) => isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file));
+    let inspections;
+    if (/\.webmanifest$/i.test(file)) {
+      try {
+        const manifest = JSON.parse(active);
+        const list = (value) => Array.isArray(value) ? value : [];
+        const images = [...list(manifest?.icons), ...list(manifest?.screenshots), ...list(manifest?.shortcuts).flatMap((shortcut) => list(shortcut?.icons))];
+        inspections = [{ references: images.map((image) => image?.src).filter((value) => typeof value === "string") }];
+      } catch {
+        add(localPath(file), "missing-asset", "Cannot parse web app manifest.", "Use a valid JSON manifest with readable local image URLs.");
+        continue;
+      }
+    } else inspections = contents.map((content) => isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file));
     const inspected = {
       references: inspections.flatMap((result) => result.references),
       unresolved: inspections.flatMap((result) => result.unresolved ?? []),
       color: inspections.find((result) => result.color)?.color,
+      importedStyles: inspections.some((result) => result.importedStyles),
     };
     for (const value of new Set(inspected.unresolved ?? [])) {
       add(localPath(file), "network-asset", `Cannot establish an offline target with unresolved character references: ${value}`, "Use literal URL characters or numeric character references.");
@@ -650,6 +687,7 @@ export function checkAssets(root) {
       }
     }
     if (localPath(file) === "src/app/icons/icons.ts") {
+      if (inspected.importedStyles) add(localPath(file), "icon-color", "Icon markup imports unchecked stylesheet paint.", "Inline icon styles using currentColor or none instead of importing stylesheets.");
       const color = inspected.color;
       if (color) add(localPath(file), "icon-color", `Icon uses fixed paint: ${color}`, "Use currentColor for icon paint. Use none for unpainted shapes.");
     }

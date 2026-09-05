@@ -809,3 +809,63 @@ test("distinct XML attribute casing cannot suppress a network href", (t) => {
   put("src/assets/test.svg", '<svg><image HREF="#unused" href="https://example.test/a.svg"/></svg>');
   single(root, "network-asset");
 });
+
+test("JSX concatenation preserves an established network prefix", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.tsx", '<image href={"https://" + host + "/a.svg"}/>');
+  single(root, "network-asset");
+});
+
+test("HTML abrupt empty-comment closures preserve following markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const comment of ["<!-->", "<!--->"]) {
+    put("src/assets/test.html", `${comment}<img src="https://example.test/a.png">`);
+    single(root, "network-asset");
+  }
+});
+
+test("grouped static string fragments form one markup document", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/test.ts", 'export const icon = \'<image \' + (\'href="https://example.test/a"/>\');');
+  single(root, "network-asset");
+  put("src/app/icons/test.ts", 'export const icon = transform(\'<image \') + (\'href="https://example.test/a"/>\');');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("foreign style character references are decoded before CSS parsing", (t) => {
+  const { root, put } = fixture(t);
+  for (const extension of ["svg", "html"]) {
+    put(`src/assets/test.${extension}`, '<svg><style>svg{filter:u&#x72;l(https://example.test/a)}</style></svg>');
+  }
+  assert.equal(checkAssets(root).filter((finding) => finding.rule === "network-asset").length, 2);
+  put("src/assets/test.svg", '<svg><style><![CDATA[svg{filter:u&#x72;l(https://example.test/a)}]]></style></svg>');
+  put("src/assets/test.html", '<style>svg{filter:u&#x72;l(https://example.test/a)}</style>');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("HTML SVG XLink attribute names are case insensitive", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<svg><image XLINK:HREF="https://example.test/a.svg"></svg>');
+  single(root, "network-asset");
+});
+
+test("icon markup cannot import unchecked paint rules", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/fixed.css", 'path { fill: red }');
+  put(icons, 'export const icon = \'<style>@import "../../assets/fixed.css";</style><path fill="none"/>\';');
+  single(root, "icon-color");
+});
+
+test("web app manifest icon URLs are inspected", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/app.webmanifest", JSON.stringify({ icons: [{ src: "https://example.test/icon.png" }] }));
+  single(root, "network-asset");
+  put("src/assets/app.webmanifest", '{');
+  single(root, "missing-asset");
+});
+
+test("foreign style entities in comments and text are not asset requests", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<svg><style>/* &copy; 2026 */ svg{fill:none}.label{content:"&copy;"}</style></svg>');
+  assert.deepEqual(checkAssets(root), []);
+});
