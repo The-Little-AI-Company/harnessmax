@@ -64,7 +64,9 @@ function templateLiteral(text, start, expression = false) {
     } else if (!braces && char === "`") {
       return { text: result + char, end: index + 1 };
     } else if (!braces && text.startsWith("${", index)) {
-      result += "${";
+      // Source text cannot contain NUL. Keep this boundary through decoding
+      // so unresolved targets differ from literal, escaped ${...} text.
+      result += "\0${";
       index += 2;
       braces = 1;
       context = controlContext();
@@ -169,9 +171,9 @@ function decodeJavascript(text) {
   return text.replace(/\\(?:u\{([\da-fA-F]+)\}|u([\da-fA-F]{4})|x([\da-fA-F]{2})|(\r\n|[\s\S]))/g, (_, point, unicode, hex, char) => {
     if (point || unicode || hex) {
       const value = Number.parseInt(point ?? unicode ?? hex, 16);
-      return String.fromCodePoint(value <= 0x10ffff ? value : 0xfffd);
+      return String.fromCodePoint(value > 0 && value <= 0x10ffff ? value : 0xfffd);
     }
-    return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", 0: "\0", "\n": "", "\r": "", "\r\n": "" })[char] ?? char;
+    return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", 0: "\ufffd", "\n": "", "\r": "", "\r\n": "" })[char] ?? char;
   });
 }
 
@@ -294,6 +296,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
   const fillRules = [];
   const paintNodes = [];
   function reference(value, base, ambiguous = false) {
+    if (value.includes("\0")) return;
     if (ambiguous) {
       unresolved.push(value);
       return;
@@ -339,6 +342,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       const name = decodeCss(match[1]).toLowerCase();
       if (paint.test(name)) {
         const value = decodeCss(match[2]);
+        if (value.includes("\0")) continue;
         colors.push(value);
         paints.set(name, value.trim().replace(/\s*!important$/i, ""));
       }
@@ -378,12 +382,13 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       return name.toLowerCase() === "style" ? "" : attribute;
     });
     let base = scopes.at(-1).base;
-    if (attributes.has("xml:base")) {
+    if (attributes.has("xml:base") && !attributes.get("xml:base").includes("\0")) {
       try { base = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
     if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
     let inlineFill;
     for (const [name, value] of attributes) {
+      if (value.includes("\0")) continue;
       const [prefix, local] = name.split(":");
       if (/^(?:href|src|poster)$/i.test(name) || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base, ambiguous.has(name));
       if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));

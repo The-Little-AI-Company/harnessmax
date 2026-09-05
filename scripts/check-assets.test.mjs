@@ -585,3 +585,19 @@ test("self-closing XML titles preserve following active markup", (t) => {
   put(icons, 'export const icon = `<svg><path fill="none"/><path d="M0 0h1"/></svg>`;');
   single(root, "icon-color");
 });
+
+test("dynamic template URL targets are not invented filenames", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", "<svg/>");
+  put(icons, 'const localIcon = "../../assets/local.svg"; export const icon = `<image href="${localIcon}"/>`;');
+  assert.deepEqual(checkAssets(root), []);
+  put(icons, 'export const icon = `<svg><image href="${localIcon}"/><image href="https://example.test/a"/></svg>`;');
+  single(root, "network-asset");
+  put("src/assets/${literal}.svg", "<svg/>");
+  put(icons, 'export const icon = `<image href="../../assets/\\${literal}.svg"/>`;');
+  assert.deepEqual(checkAssets(root), []);
+  for (const escape of [String.raw`\0`, String.raw`\u0000`, String.raw`\x00`]) {
+    put(icons, `export const icon = '<image href="https://example.test/${escape}asset"/>';`);
+    single(root, "network-asset");
+  }
+});
