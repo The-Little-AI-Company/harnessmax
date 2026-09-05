@@ -20,6 +20,7 @@ const requiredAssets = [
 ];
 const rules = ["network-asset", "missing-asset", "unproven-font", "icon-color"];
 const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
+const sourceExtension = /\.(?:css|svg|[cm]?js|[jt]sx?|html|xml)$/i;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
 const regexLiteral = String.raw`/(?![/*])(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\[\\\r\n])+/[a-z]*`;
@@ -157,11 +158,11 @@ function* markupElements(text, html, jsx) {
     const element = tag.source.match(/^<([\w:-]+)/)?.[1]?.toLowerCase();
     const selfClosing = /\/>$/.test(tag.source) && !html;
     if (!selfClosing && (element === "style" || (html && /^(?:textarea|title|xmp|iframe|noembed|noframes|script|plaintext)$/.test(element ?? "")))) {
-      const closing = new RegExp(`</${element}\\s*>`, "gi");
+      const closing = new RegExp(html ? `</${element}(?=[\\s/>])` : `</${element}\\s*>`, "gi");
       closing.lastIndex = cursor;
       const end = element === "plaintext" ? null : closing.exec(text);
       const content = text.slice(cursor, end?.index ?? text.length);
-      cursor = end ? closing.lastIndex : text.length;
+      cursor = end ? (html ? readTag(text, end.index, false).end : closing.lastIndex) : text.length;
       yield { source: tag.source, css: element === "style" ? content : undefined, complete: true };
     } else yield { source: tag.source, complete: false };
   }
@@ -295,6 +296,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
   const colors = [];
   const fillRules = [];
   const paintNodes = [];
+  let documentBase = inheritedBase, baseSeen = false;
   function reference(value, base, ambiguous = false) {
     if (value.includes("\0")) return;
     if (ambiguous) {
@@ -349,7 +351,7 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     }
     return paints;
   }
-  const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]), base: inheritedBase }];
+  const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]) }];
   for (const { source, css, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
     const element = source.match(/^<\/?([\w:-]+)/)?.[1];
     if (source.startsWith("</")) {
@@ -368,7 +370,9 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
       if (raw.startsWith("{")) value = decodeJavascript(value);
       // JSX expression strings contain JavaScript text, not XML entities.
-      if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi, (entity, entityName) => {
+      const entities = html ? /&(#x[\da-f]+|#\d+);?|&([a-z][\da-z]*);/gi : /&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi;
+      if (!raw.startsWith("{")) value = value.replace(entities, (entity, numeric, named) => {
+        const entityName = numeric ?? named;
         if (!entityName.startsWith("#")) {
           const decoded = ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[entityName];
           if (decoded === undefined) ambiguous.add(name);
@@ -381,14 +385,26 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
       if (name.startsWith("xmlns:")) namespaces.set(name.slice(6), value);
       return name.toLowerCase() === "style" ? "" : attribute;
     });
-    let base = scopes.at(-1).base;
+    const htmlAttributes = new Map([...attributes].map(([name, value]) => [name.toLowerCase(), value]));
+    let scopedBase = scopes.at(-1).base;
+    let base = scopedBase ?? documentBase;
+    if (html && element?.toLowerCase() === "base" && !baseSeen && htmlAttributes.has("href")) {
+      baseSeen = true;
+      const value = htmlAttributes.get("href");
+      if (!value.includes("\0")) {
+        const unknown = [...ambiguous].some((name) => name.toLowerCase() === "href");
+        if (unknown || /^(?:[a-z][a-z\d+.-]*:|[/\\]{2})/i.test(value)) reference(value, undefined, unknown);
+        try { documentBase = new URL(value.replace(/\\/g, "/"), inheritedBase ?? pathToFileURL(file)); } catch { /* Invalid HTML bases retain the document URL. */ }
+      }
+    }
     if (attributes.has("xml:base") && !attributes.get("xml:base").includes("\0")) {
-      try { base = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
+      try { base = scopedBase = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
     if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
     let inlineFill;
     for (const [name, value] of attributes) {
       if (value.includes("\0")) continue;
+      if (html && element?.toLowerCase() === "base" && name.toLowerCase() === "href") continue;
       const [prefix, local] = name.split(":");
       if (/^(?:href|src|poster)$/i.test(name) || (name === "xlinkHref" && /\.[jt]sx$/i.test(file)) || (local === "href" && namespaces.get(prefix) === "http://www.w3.org/1999/xlink") || (object && name.toLowerCase() === "data")) reference(value, base, ambiguous.has(name));
       if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));
@@ -404,12 +420,11 @@ function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) 
     }
     const paintNode = { element, attributes, inlineFill, parent: scopes.at(-1).paintNode };
     paintNodes.push(paintNode);
-    const htmlAttributes = new Map([...attributes].map(([name, value]) => [name.toLowerCase(), value]));
     if (element?.toLowerCase() === "meta" && htmlAttributes.get("http-equiv")?.toLowerCase() === "refresh") {
       const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
       if (refresh) reference(refresh[1].trim(), base);
     }
-    if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base, paintNode });
+    if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base: scopedBase, paintNode });
     for (const value of urls(tag, false)) reference(value, base);
   }
   for (const node of paintNodes) {
@@ -484,14 +499,15 @@ export function checkAssets(root) {
 
   const provenance = new Map();
   const fonts = [];
-  for (const file of [...scanned].sort(compare)) {
+  const queue = [...scanned].sort(compare);
+  for (const file of queue) {
     const bytes = read(file);
     if (!bytes) continue;
     if (fontExtension.test(file)) {
       fonts.push([file, bytes]);
       continue;
     }
-    if (!/\.(?:css|svg|[cm]?js|[jt]sx?|json|txt|html|xml)$/i.test(file)) continue;
+    if (!sourceExtension.test(file)) continue;
     let text;
     try {
       const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
@@ -534,13 +550,18 @@ export function checkAssets(root) {
     for (const value of new Set(inspected.unresolved ?? [])) {
       add(localPath(file), "network-asset", `Cannot establish an offline target with unresolved character references: ${value}`, "Use literal URL characters or numeric character references.");
     }
-    for (const url of new Set(inspected.references)) {
+    for (const originalUrl of new Set(inspected.references)) {
+      const url = originalUrl.replace(/\\/g, "/");
       if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) {
         add(localPath(file), "network-asset", `URL uses a scheme or network address: ${url}`, "Vendor the asset and use a relative local URL.");
       } else if (url && !url.startsWith("#")) {
         try {
           const path = decodeURIComponent(url.split(/[?#]/, 1)[0]);
-          read(resolve(url.startsWith("/") ? base : dirname(file), path.replace(/^\//, "")));
+          const target = resolve(url.startsWith("/") ? base : dirname(file), path.replace(/^\//, ""));
+          if (read(target) && !scanned.has(target) && (sourceExtension.test(target) || fontExtension.test(target))) {
+            scanned.add(target);
+            queue.push(target);
+          }
         } catch {
           add(localPath(file), "missing-asset", `URL has an invalid local path: ${url}`, "Use a valid relative URL to a readable local file.");
         }

@@ -601,3 +601,64 @@ test("dynamic template URL targets are not invented filenames", (t) => {
     single(root, "network-asset");
   }
 });
+
+test("HTML numeric references can omit their semicolon", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<iframe srcdoc="&#60img src=https://example.test/a>"></iframe>');
+  single(root, "network-asset");
+});
+
+test("HTML recovered raw-text end tags preserve following markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const ending of ['</title data-x>', '</title/>']) {
+    put("src/assets/test.html", `<title>x${ending}<img src="https://example.test/a">`);
+    single(root, "network-asset");
+  }
+});
+
+test("the first HTML base resolves subsequent document references", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/other/index.html", "");
+  put("src/assets/image.png", "fixture image");
+  put("src/assets/test.html", '<base href="other/index.html"><base href="ignored/"><img src="image.png">');
+  const finding = single(root, "missing-asset");
+  assert.equal(finding.path, "src/assets/other/image.png");
+  put("src/assets/other/image.png", "fixture image");
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("URL backslashes cannot disguise a network-path reference", (t) => {
+  const { root, put } = fixture(t);
+  put(String.raw`src/assets/\\example.test\a`, "fixture image");
+  put("src/assets/test.html", String.raw`<img src="\\example.test\a">`);
+  single(root, "network-asset");
+});
+
+test("HTML base attribute names are case insensitive", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.png", "fixture image");
+  put("src/assets/test.html", '<base HREF="https://example.test/"><img src="local.png">');
+  assert.ok(checkAssets(root).some((finding) => finding.rule === "network-asset"));
+});
+
+test("a srcdoc base overrides the inherited document base", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/outer/icon.png", "fixture image");
+  put("src/assets/test.html", '<base href="outer/index.html"><iframe srcdoc="&lt;html&gt;&lt;base href=\'../inner/index.html\'&gt;&lt;img src=\'icon.png\'&gt;&lt;/html&gt;"></iframe>');
+  assert.equal(single(root, "missing-asset").path, "src/assets/inner/icon.png");
+  put("src/assets/inner/icon.png", "fixture image");
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("imported local stylesheets are inspected recursively with cycle protection", (t) => {
+  const { root, put } = fixture(t);
+  put("src/styles/outside.css", '@import "../../vendor/evil.css";');
+  put("vendor/evil.css", '@import "../src/styles/outside.css";body{background:url(https://example.test/a)}');
+  single(root, "network-asset");
+});
+
+test("plain-text asset examples are not parsed as markup", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/example.txt", "Documentation: <img src=https://example.test/a>");
+  assert.deepEqual(checkAssets(root), []);
+});
