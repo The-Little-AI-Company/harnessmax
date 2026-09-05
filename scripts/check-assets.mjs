@@ -297,7 +297,7 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
     } else if (javascript && token === "/" && (regexContext.test(active) || context.closed || !active.trim())) {
       const literal = text.slice(match.index).match(new RegExp("^" + regexLiteral, "i"))?.[0];
       if (literal) {
-        token = literal;
+        token = "0";
         tokens.lastIndex = match.index + literal.length;
       }
     } else if (javascript && token.startsWith("//")) {

@@ -869,3 +869,9 @@ test("foreign style entities in comments and text are not asset requests", (t) =
   put("src/assets/test.html", '<svg><style>/* &copy; 2026 */ svg{fill:none}.label{content:"&copy;"}</style></svg>');
   assert.deepEqual(checkAssets(root), []);
 });
+
+test("markup-like JavaScript regex text does not define an icon", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, String.raw`export const pattern = /<path fill="red"\/>/; export const icon = '<path fill="none"/>';`);
+  assert.deepEqual(checkAssets(root), []);
+});
