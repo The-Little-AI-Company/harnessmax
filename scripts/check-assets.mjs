@@ -98,6 +98,8 @@ function splitComments(text, javascript = false, jsx = false) {
     const expression = expressions.at(-1);
     const markupText = depth > 0 && (!expression || depth > expression.depth);
     if (jsx && token.startsWith("<")) {
+      token = token.replace(/"[^"]*"|'[^']*'|\{(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|[^}])*\}/g,
+        (part) => part.startsWith("{") ? splitComments(part, true).active : part);
       if (token.startsWith("</")) depth = Math.max(0, depth - 1);
       else if (!token.endsWith("/>")) depth++;
     } else if (jsx && token === "{" && depth > 0) {
@@ -189,7 +191,13 @@ function inspectMarkup(text) {
     const object = /^<object\b/i.test(match[0]);
     const tag = match[0].replace(/\b([\w:-]+)\s*=\s*(\{\s*(?:"[^"]*"|'[^']*'|`[^`]*`)\s*\}|"[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (attribute, name, raw) => {
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
-      const value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
+      let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
+      // JSX expression strings contain JavaScript text, not XML entities.
+      if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, name) => {
+        if (!name.startsWith("#")) return ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" })[name] ?? entity;
+        const point = /^#x/i.test(name) ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+        return String.fromCodePoint(point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? point : 0xfffd);
+      }).trim();
       if (/^(?:href|xlink:href|src|poster)$/i.test(name) || (object && name.toLowerCase() === "data")) references.push(value);
       if (/^srcset$/i.test(name)) references.push(...srcsetUrls(value));
       if (paint.test(name)) colors.push(value);

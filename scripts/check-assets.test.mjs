@@ -355,3 +355,19 @@ test("regex literal comment markers do not erase active markup", (t) => {
     single(root, "network-asset");
   }
 });
+
+test("comments in static JSX attributes do not change their values", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/local.svg", "<svg/>");
+  put("src/app/icons/extra.tsx", 'export const icon = <image href={/* source */ "../../assets/local.svg" /* end */}/>;');
+  assert.deepEqual(checkAssets(root), []);
+});
+
+test("markup character references decode before resolving asset paths", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/logo&mark.svg", "<svg/>");
+  put("src/assets/identity/mark.svg", '<svg><use href="&#35;shape"/><use href="&#32;&#x23;shape"/><image href="../logo&amp;mark.svg&#32;"/></svg>');
+  assert.deepEqual(checkAssets(root), []);
+  put("src/assets/identity/mark.svg", '<svg><image href="&#104;ttps://example.test/a"/></svg>');
+  single(root, "network-asset");
+});
