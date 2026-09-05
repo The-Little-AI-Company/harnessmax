@@ -109,8 +109,10 @@ function templateLiteral(text, start) {
 }
 
 // Consume quoted strings as units, so comment markers inside strings survive.
-function splitComments(text, javascript = false, jsx = false) {
+function splitComments(text, javascript = false, jsx = false, extractDocuments = false) {
   const comments = [];
+  const documents = [];
+  let documentTail = 0;
   const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[(){}/]` : cssStrings;
   const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
@@ -157,10 +159,16 @@ function splitComments(text, javascript = false, jsx = false) {
       token = " ";
     }
     if (javascript && !markupText) context.consume(token, active);
+    if (extractDocuments && !markupText && /^["'`]/.test(token)) {
+      if (documents.length && /^\s*\+\s*$/.test(active.slice(documentTail))) documents[documents.length - 1] += token.slice(1, -1);
+      else documents.push(token.slice(1, -1));
+      token = '""';
+      documentTail = active.length + token.length;
+    }
     active += token;
     cursor = tokens.lastIndex;
   }
-  return { active: active + text.slice(cursor), comments };
+  return { active: active + text.slice(cursor), comments, documents };
 }
 
 function urls(text, stylesheet) {
@@ -407,7 +415,7 @@ export function checkAssets(root) {
     const text = bytes.toString("utf8");
     const isStylesheet = extname(file).toLowerCase() === ".css";
     const javascript = /\.(?:[cm]?js|[jt]sx?)$/i.test(file);
-    const { active, comments } = isStylesheet || javascript ? splitComments(text, javascript, /\.[jt]sx$/i.test(file)) : { active: text, comments: [] };
+    const { active, comments, documents = [] } = isStylesheet || javascript ? splitComments(text, javascript, /\.[jt]sx$/i.test(file), javascript) : { active: text, comments: [] };
     if (localPath(file) === "src/styles/tokens/fonts.css") {
       for (const comment of comments) {
         for (const line of comment.split(/\r?\n/)) {
@@ -428,8 +436,13 @@ export function checkAssets(root) {
       }
     }
     // Serialized icon markup is inspected as text, never imported or executed.
-    const content = javascript ? active.replace(/\\(["'])/g, "$1") : active;
-    const inspected = isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file);
+    const contents = [active, ...documents.filter((document) => document.includes("<"))].map((content) => javascript ? content.replace(/\\(["'])/g, "$1") : content);
+    const inspections = contents.map((content) => isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file));
+    const inspected = {
+      references: inspections.flatMap((result) => result.references),
+      unresolved: inspections.flatMap((result) => result.unresolved ?? []),
+      color: inspections.find((result) => result.color)?.color,
+    };
     for (const value of new Set(inspected.unresolved ?? [])) {
       add(localPath(file), "network-asset", `Cannot establish an offline target with unresolved character references: ${value}`, "Use literal URL characters or numeric character references.");
     }

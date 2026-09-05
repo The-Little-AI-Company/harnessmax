@@ -68,7 +68,7 @@ test("icon-color reports one fixed icon color", (t) => {
 
 test("findings sort by path then rule consistently", (t) => {
   const { root, put } = fixture(t);
-  put(icons, '<path stroke="red" style="filter:url(https://example.test/filter)"/>');
+  put(icons, 'export const icon = `<path stroke="red" style="filter:url(https://example.test/filter)"/>`;');
   rmSync(join(root, "src/assets/fonts/OFL.txt"));
   const first = checkAssets(root);
   assert.equal(first.length, 3);
@@ -514,4 +514,12 @@ test("icon geometry cannot inherit the default black fill", (t) => {
     put(icons, `export const icon = \`<svg><path id="shape" class="shape" stroke="currentColor"/><style>${selector}{fill:none}</style></svg>\`;`);
     assert.deepEqual(checkAssets(root), []);
   }
+});
+
+test("CSS in one serialized icon cannot hide another icon's default fill", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, 'export const icons = { first: `<svg><style>path{fill:none}</style><path d="M0 0h1"/></svg>`, second: `<svg><path d="M0 0h1"/></svg>` };');
+  single(root, "icon-color");
+  put(icons, 'export const icons = { box: \'<svg fill="none">\' + \'<path d="M0 0h1"/>\' + \'</svg>\' };');
+  assert.deepEqual(checkAssets(root), []);
 });
