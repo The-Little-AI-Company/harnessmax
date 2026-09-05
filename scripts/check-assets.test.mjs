@@ -413,7 +413,7 @@ test("network XML bases are rejected even for fragment references", (t) => {
 
 test("escaped CSS paint property identifiers cannot hide fixed colors", (t) => {
   const { root, put } = fixture(t);
-  put(icons, String.raw`export const icon = '<path style="st\72 oke:red"/>';`);
+  put(icons, String.raw`export const icon = '<path style="st\\72 oke:red"/>';`);
   single(root, "icon-color");
   put(icons, 'export const icon = `<svg><style>.label{content:";stroke:red"}.shape{stroke:currentColor}</style></svg>`;');
   assert.deepEqual(checkAssets(root), []);
@@ -522,4 +522,66 @@ test("CSS in one serialized icon cannot hide another icon's default fill", (t) =
   single(root, "icon-color");
   put(icons, 'export const icons = { box: \'<svg fill="none">\' + \'<path d="M0 0h1"/>\' + \'</svg>\' };');
   assert.deepEqual(checkAssets(root), []);
+});
+
+test("fragment references resolve an external local XML base", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg xml:base="missing-sprite.svg"><use href="#icon"/></svg>');
+  single(root, "missing-asset");
+});
+
+test("loop operators allow regex literal operands", (t) => {
+  const { root, put } = fixture(t);
+  for (const operator of ["of", "in"]) {
+    put(icons, `for (const x ${operator} /[/*]/g.exec("/*")) {} export const icon = \`<image href="https://example.test/a"/>\`;`);
+    single(root, "network-asset");
+  }
+});
+
+test("inactive conditional CSS cannot clear default icon fill", (t) => {
+  const { root, put } = fixture(t);
+  put(icons, 'export const icon = `<svg><style>@media not all { path { fill:none } }</style><path d="M0 0h1"/></svg>`;');
+  single(root, "icon-color");
+});
+
+test("JSX expressions finish before a tag can close", (t) => {
+  const { root, put } = fixture(t);
+  put("src/app/icons/extra.tsx", 'export const icon = <image hidden={a > b} href="https://example.test/a.svg"/>;');
+  single(root, "network-asset");
+});
+
+test("static JavaScript escapes are decoded before scanning markup", (t) => {
+  const { root, put } = fixture(t);
+  for (const opening of [String.raw`\x3c`, String.raw`\u003c`, String.raw`\u{3c}`]) {
+    put(icons, `export const icon = \`${opening}image href="https://example.test/a.svg"/>\`;`);
+    single(root, "network-asset");
+  }
+  for (const opening of [String.raw`\X3c`, String.raw`\U003c`]) {
+    put(icons, `export const icon = "${opening}image href='https://example.test/a'/>";`);
+    assert.deepEqual(checkAssets(root), []);
+  }
+});
+
+test("comment markers inside quoted markup attributes stay inert", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/test.html", '<div title="<!--"></div><img src="https://example.test/a.png">');
+  single(root, "network-asset");
+});
+
+test("BOM-selected UTF-16 SVG text is decoded before scanning", (t) => {
+  const { root, put } = fixture(t);
+  const littleEndian = Buffer.from('\ufeff<svg><image href="https://example.test/a"/></svg>', "utf16le");
+  for (const bytes of [littleEndian, Buffer.from(littleEndian).swap16()]) {
+    put("src/assets/identity/mark.svg", bytes);
+    single(root, "network-asset");
+  }
+});
+
+test("self-closing XML titles preserve following active markup", (t) => {
+  const { root, put } = fixture(t);
+  put("src/assets/identity/mark.svg", '<svg><title/><image href="https://example.test/a.svg"/></svg>');
+  single(root, "network-asset");
+  put("src/assets/identity/mark.svg", "<svg/>");
+  put(icons, 'export const icon = `<svg><path fill="none"/><path d="M0 0h1"/></svg>`;');
+  single(root, "icon-color");
 });

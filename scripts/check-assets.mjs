@@ -23,7 +23,7 @@ const fontExtension = /\.(?:woff2?|ttf|otf)$/i;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const cssStrings = String.raw`"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n\f])*(?:"|(?=[\r\n\f]|$))|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n\f])*(?:'|(?=[\r\n\f]|$))`;
 const regexLiteral = String.raw`/(?![/*])(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\[\\\r\n])+/[a-z]*`;
-const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await|else|do))\s*$/;
+const regexContext = /(?:[({[=,:;!?&|+*%^~<>-]|\b(?:return|throw|case|delete|void|typeof|yield|await|else|do|in|of|instanceof))\s*$/;
 
 function controlContext() {
   const parentheses = [];
@@ -52,8 +52,8 @@ function decodeCss(text) {
 
 // A template's literal text is markup, but its interpolations are JavaScript.
 // Keep strings and nested templates intact while removing expression comments.
-function templateLiteral(text, start) {
-  let result = "`", index = start + 1, braces = 0;
+function templateLiteral(text, start, expression = false) {
+  let result = expression ? "{" : "`", index = start + 1, braces = expression ? 1 : 0;
   let context = controlContext();
   while (index < text.length) {
     const char = text[index];
@@ -104,8 +104,75 @@ function templateLiteral(text, start) {
       index++;
     }
     if (braces) context.consume(result.slice(previous.length), previous);
+    if (expression && !braces) return { text: result, end: index };
   }
   return { text: result, end: index };
+}
+
+function readTag(text, start, jsx) {
+  if (!/^<(?:\/?[a-z]|\?xml-stylesheet|\/?>)/i.test(text.slice(start))) return null;
+  let source = "<", index = start + 1;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '"' || char === "'") {
+      const end = text.indexOf(char, index + 1);
+      const next = end < 0 ? text.length : end + 1;
+      source += text.slice(index, next);
+      index = next;
+    } else if (jsx && char === "{") {
+      const region = templateLiteral(text, index, true);
+      const value = region.text.slice(1, -1).trim();
+      source += /^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`[^`$]*`)$/.test(value) ? region.text : "{}";
+      index = region.end;
+    } else {
+      source += char;
+      index++;
+      if (char === ">") return { source, end: index };
+    }
+  }
+  return { source, end: index };
+}
+
+function* markupElements(text, html, jsx) {
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf("<", cursor);
+    if (start < 0) return;
+    if (text.startsWith("<!--", start)) {
+      const end = /--!?>/g;
+      end.lastIndex = start + 4;
+      cursor = end.exec(text) ? end.lastIndex : text.length;
+      continue;
+    }
+    if (text.startsWith("<![CDATA[", start)) {
+      const end = text.indexOf("]]>", start + 9);
+      cursor = end < 0 ? text.length : end + 3;
+      continue;
+    }
+    const tag = readTag(text, start, jsx);
+    if (!tag) { cursor = start + 1; continue; }
+    cursor = tag.end;
+    const element = tag.source.match(/^<([\w:-]+)/)?.[1]?.toLowerCase();
+    const selfClosing = /\/>$/.test(tag.source) && !html;
+    if (!selfClosing && (element === "style" || (html && /^(?:textarea|title|xmp|iframe|noembed|noframes|script|plaintext)$/.test(element ?? "")))) {
+      const closing = new RegExp(`</${element}\\s*>`, "gi");
+      closing.lastIndex = cursor;
+      const end = element === "plaintext" ? null : closing.exec(text);
+      const content = text.slice(cursor, end?.index ?? text.length);
+      cursor = end ? closing.lastIndex : text.length;
+      yield { source: tag.source, css: element === "style" ? content : undefined, complete: true };
+    } else yield { source: tag.source, complete: false };
+  }
+}
+
+function decodeJavascript(text) {
+  return text.replace(/\\(?:u\{([\da-fA-F]+)\}|u([\da-fA-F]{4})|x([\da-fA-F]{2})|(\r\n|[\s\S]))/g, (_, point, unicode, hex, char) => {
+    if (point || unicode || hex) {
+      const value = Number.parseInt(point ?? unicode ?? hex, 16);
+      return String.fromCodePoint(value <= 0x10ffff ? value : 0xfffd);
+    }
+    return ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", 0: "\0", "\n": "", "\r": "", "\r\n": "" })[char] ?? char;
+  });
 }
 
 // Consume quoted strings as units, so comment markers inside strings survive.
@@ -114,7 +181,7 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
   const documents = [];
   let documentTail = 0;
   const strings = javascript ? String.raw`"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60|//[^\r\n]*|[a-z_$][\w$]*|[(){}/]` : cssStrings;
-  const tags = jsx ? String.raw`</?[a-z][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*>|</?>|[{}]|` : "";
+  const tags = jsx ? String.raw`</?[a-z][\w:.-]*|</?>|[{}]|` : "";
   const tokens = new RegExp(tags + String.raw`/\*[\s\S]*?(?:\*/|$)|` + strings, "gi");
   let active = "", cursor = 0, depth = 0;
   const expressions = [];
@@ -128,8 +195,9 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
     const expression = expressions.at(-1);
     const markupText = depth > 0 && (!expression || depth > expression.depth);
     if (jsx && token.startsWith("<")) {
-      token = token.replace(/"[^"]*"|'[^']*'|\{(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|[^}])*\}/g,
-        (part) => part.startsWith("{") ? splitComments(part, true).active : part);
+      const tag = readTag(text, match.index, true);
+      token = tag.source;
+      tokens.lastIndex = tag.end;
       if (token.startsWith("</")) depth = Math.max(0, depth - 1);
       else if (!token.endsWith("/>")) depth++;
     } else if (jsx && token === "{" && depth > 0) {
@@ -160,8 +228,9 @@ function splitComments(text, javascript = false, jsx = false, extractDocuments =
     }
     if (javascript && !markupText) context.consume(token, active);
     if (extractDocuments && !markupText && /^["'`]/.test(token)) {
-      if (documents.length && /^\s*\+\s*$/.test(active.slice(documentTail))) documents[documents.length - 1] += token.slice(1, -1);
-      else documents.push(token.slice(1, -1));
+      const value = token.startsWith("`") && /\bString\.raw\s*$/.test(active) ? token.slice(1, -1) : decodeJavascript(token.slice(1, -1));
+      if (documents.length && /^\s*\+\s*$/.test(active.slice(documentTail))) documents[documents.length - 1] += value;
+      else documents.push(value);
       token = '""';
       documentTail = active.length + token.length;
     }
@@ -218,7 +287,7 @@ function srcsetUrls(value) {
   return sources;
 }
 
-function inspectMarkup(text, file, inheritedBase) {
+function inspectMarkup(text, file, inheritedBase, html = /\.html?$/i.test(file) || (!/\.(?:svg|xml)$/i.test(file) && !/^\s*<svg\b/i.test(text))) {
   const references = [];
   const unresolved = [];
   const colors = [];
@@ -229,12 +298,14 @@ function inspectMarkup(text, file, inheritedBase) {
       unresolved.push(value);
       return;
     }
-    if (!base || !value || value.startsWith("#") || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(value)) {
+    if (!base || !value || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(value)) {
       references.push(value);
       return;
     }
     try {
       const target = new URL(value, base);
+      if (value.startsWith("#") && target.protocol === "file:" && fileURLToPath(target) === file) return;
+      if (target.protocol !== "file:") target.hash = "";
       references.push(target.protocol === "file:" ? relative(dirname(file), fileURLToPath(target)).split(sep).map(encodeURIComponent).join("/") : target.href);
     } catch {
       references.push(value);
@@ -244,11 +315,19 @@ function inspectMarkup(text, file, inheritedBase) {
   function stylesheet(text, base, embedded = false) {
     const { active } = splitComments(text.replace(/\r\n?|\f/g, "\n"));
     if (embedded) {
-      for (const rule of active.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        const fill = stylesheet(rule[2], base).get("fill");
-        if (!fill) continue;
-        for (const selector of rule[1].split(",").map((value) => value.trim())) {
-          if (/^(?:\*|[a-z][\w-]*|[.#][\w-]+)$/i.test(selector)) fillRules.push({ selector, fill });
+      let depth = 0, start = 0, body = 0, selectors = "";
+      for (const token of active.matchAll(new RegExp(cssStrings + "|[{}]", "g"))) {
+        if (token[0] === "{") {
+          if (depth++ === 0) { selectors = active.slice(start, token.index).trim(); body = token.index + 1; }
+        } else if (token[0] === "}" && --depth === 0) {
+          const declarations = active.slice(body, token.index);
+          start = token.index + 1;
+          if (selectors.startsWith("@") || /[{}]/.test(declarations.replace(new RegExp(cssStrings, "g"), ""))) continue;
+          const fill = stylesheet(declarations, base).get("fill");
+          if (!fill) continue;
+          for (const selector of selectors.split(",").map((value) => value.trim())) {
+            if (/^(?:\*|[a-z][\w-]*|[.#][\w-]+)$/i.test(selector)) fillRules.push({ selector, fill });
+          }
         }
       }
     }
@@ -266,13 +345,8 @@ function inspectMarkup(text, file, inheritedBase) {
     }
     return paints;
   }
-  const markup = text.replace(/<!--[\s\S]*?(?:--!?>|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<style\b[^>]*>([\s\S]*?)(?:<\/style\s*>|$)/gi,
-    (whole, css) => css === undefined ? "" : whole)
-    .replace(/<(textarea|title|xmp|iframe|noembed|noframes|script)\b((?:"[^"]*"|'[^']*'|[^'">])*)>[\s\S]*?(?:<\/\1\s*>|$)/gi, "<$1$2></$1>")
-    .replace(/<plaintext\b[^>]*>[\s\S]*$/gi, "");
   const scopes = [{ namespaces: new Map([["xlink", "http://www.w3.org/1999/xlink"]]), base: inheritedBase }];
-  for (const match of markup.matchAll(/<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)(?:<\/style\s*>|$)|<(?:\/?[a-z][\w:-]*|\?xml-stylesheet\b)(?:"[^"]*"|'[^']*'|[^'">])*>/gi)) {
-    const source = match[1] === undefined ? match[0] : match[0].match(/^<style\b(?:"[^"]*"|'[^']*'|[^'">])*?>/i)[0];
+  for (const { source, css, complete } of markupElements(text, html, /\.[jt]sx$/i.test(file))) {
     const element = source.match(/^<\/?([\w:-]+)/)?.[1];
     if (source.startsWith("</")) {
       const index = scopes.findLastIndex((scope) => scope.element === element);
@@ -288,6 +362,7 @@ function inspectMarkup(text, file, inheritedBase) {
       const literal = raw.startsWith("{") ? raw.slice(1, -1).trim() : raw;
       if (raw.startsWith("{") && !/^(?:"[^"]*"|'[^']*'|`[^`$]*`)$/.test(literal)) return "";
       let value = (/^["'`]/.test(literal) ? literal.slice(1, -1) : literal).trim();
+      if (raw.startsWith("{")) value = decodeJavascript(value);
       // JSX expression strings contain JavaScript text, not XML entities.
       if (!raw.startsWith("{")) value = value.replace(/&(#x[\da-f]+|#\d+|[a-z][\da-z]*);/gi, (entity, entityName) => {
         if (!entityName.startsWith("#")) {
@@ -306,7 +381,7 @@ function inspectMarkup(text, file, inheritedBase) {
     if (attributes.has("xml:base")) {
       try { base = new URL(attributes.get("xml:base"), base ?? pathToFileURL(file)); } catch { /* An invalid base has no resolvable target. */ }
     }
-    if (match[1] !== undefined) stylesheet(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
+    if (css !== undefined) stylesheet(css.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"), base, true);
     let inlineFill;
     for (const [name, value] of attributes) {
       const [prefix, local] = name.split(":");
@@ -314,7 +389,7 @@ function inspectMarkup(text, file, inheritedBase) {
       if (/^srcset$/i.test(name)) for (const source of srcsetUrls(value)) reference(source, base, ambiguous.has(name));
       if (name === "xml:base" && /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) references.push(value);
       if (name.toLowerCase() === "srcdoc") {
-        const nested = inspectMarkup(value, file, base);
+        const nested = inspectMarkup(value, file, base, true);
         references.push(...nested.references);
         unresolved.push(...nested.unresolved);
         if (nested.color) colors.push(nested.color);
@@ -329,7 +404,7 @@ function inspectMarkup(text, file, inheritedBase) {
       const refresh = htmlAttributes.get("content")?.match(/;\s*(?:url\s*=\s*)?["']?([^"']+)/i);
       if (refresh) reference(refresh[1].trim(), base);
     }
-    if (match[1] === undefined && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base, paintNode });
+    if (!complete && !/\/>$/.test(source) && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(element ?? "") && element) scopes.push({ element, namespaces, base, paintNode });
     for (const value of urls(tag, false)) reference(value, base);
   }
   for (const node of paintNodes) {
@@ -412,7 +487,15 @@ export function checkAssets(root) {
       continue;
     }
     if (!/\.(?:css|svg|[cm]?js|[jt]sx?|json|txt|html|xml)$/i.test(file)) continue;
-    const text = bytes.toString("utf8");
+    let text;
+    try {
+      const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+      text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+      if (text.includes("\0")) throw new Error("Unsupported NUL text");
+    } catch {
+      add(localPath(file), "missing-asset", "Cannot decode asset text.", "Use valid UTF-8 or BOM-selected UTF-16 text without NUL characters.");
+      continue;
+    }
     const isStylesheet = extname(file).toLowerCase() === ".css";
     const javascript = /\.(?:[cm]?js|[jt]sx?)$/i.test(file);
     const { active, comments, documents = [] } = isStylesheet || javascript ? splitComments(text, javascript, /\.[jt]sx$/i.test(file), javascript) : { active: text, comments: [] };
@@ -436,7 +519,7 @@ export function checkAssets(root) {
       }
     }
     // Serialized icon markup is inspected as text, never imported or executed.
-    const contents = [active, ...documents.filter((document) => document.includes("<"))].map((content) => javascript ? content.replace(/\\(["'])/g, "$1") : content);
+    const contents = [active, ...documents.filter((document) => document.includes("<"))];
     const inspections = contents.map((content) => isStylesheet ? { references: urls(content, true) } : inspectMarkup(content, file));
     const inspected = {
       references: inspections.flatMap((result) => result.references),
